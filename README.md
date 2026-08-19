@@ -33,6 +33,11 @@ for /f "tokens=5" %a in ('netstat -ano ^| findstr :3080 ^| findstr LISTENING') d
 start "" /b dsh web --host 127.0.0.1 --port 3080
 ```
 
+<img width="855" height="825" alt="image" src="https://github.com/user-attachments/assets/7ea8892b-c252-46a2-959b-ca5eab31aac5" />
+<img width="1911" height="1039" alt="image" src="https://github.com/user-attachments/assets/bfdcd4ad-0009-4c5c-85ca-953a9eff89d1" />
+
+
+
 ### Local development
 
 ```sh
