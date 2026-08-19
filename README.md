@@ -6,72 +6,80 @@ An LLM provider plugin that adds **NewAPI** to [DeepSeek Harness](https://github
 
 - Provider route id: `newapi`
 - Display name: `NewAPI`
-- Shape: LLM Provider plugin — implements the `LlmAdapter` seam from `@deepseek-ai/dsh-llm`; NewAPI is an OpenAI-compatible gateway (`POST {baseURL}/chat/completions`, `GET {baseURL}/models`, baseURL includes `/v1`)
+- Shape: LLM Provider plugin — implements the `LlmAdapter` seam from `@deepseek-ai/dsh-llm`; NewAPI gateway generation can use OpenAI (`POST {baseURL}/chat/completions` or `POST {baseURL}/responses`) or Anthropic Messages (`POST {baseURL}/messages`), with `GET {baseURL}/models` for discovery
 - Dual-face structure: host side (adapter + model discovery) + browser side (a "NewAPI" settings page in the dsh web settings panel, including "Fetch model info")
 
 Design decisions and trade-off analysis live in [DESIGN.md](DESIGN.md); reference implementation: `deepseek-harness/packages/llm/llm-deepseek`.
 
-## Installation (dsh ≥ 0.1.0-rc)
+## Installation (dsh >= 0.1.0-rc)
 
-### Release channels and version selection
-
-The project uses a **dual release channel**. Install from the **npm registry** (default) or a **versioned tag**; never from the `main` branch HEAD:
-
-| Channel | Version shape | Install reference | When to use |
-|---|---|---|---|
-| **Stable (recommended)** | `vX.Y.Z` | `dsh plugin --profile web add dsh-llm-newapi` (npm `latest`) or `github:wenzetan/dsh-llm-newapi#latest` | Daily use; passed all gates and promoted after manual confirmation |
-| **Prerelease** | `vX.Y.Z-rc.N` etc. | `dsh plugin --profile web add dsh-llm-newapi@next` or `github:wenzetan/dsh-llm-newapi#v0.8.2-rc.3` | Trying out / validating new features; not manually confirmed, published only as GitHub Pre-release and npm `next` |
-| **main branch HEAD (not recommended)** | no tag | `github:wenzetan/dsh-llm-newapi` | Development preview; untagged commits have not gone through release verification and may be unstable |
-
-> 💡 The npm `latest` dist-tag (and the GitHub `latest` tag) always points at the newest **manually confirmed** stable version, so the default install command never goes stale and this README does not need per-release updates. Pin an exact `#vX.Y.Z` only when you must reproduce an older build. The tag-less `github:` shorthand installs `main` HEAD — that is not a release channel.
-
-### Option A: npm registry (default, recommended)
+### Install from this GitHub repository
 
 ```sh
-dsh plugin --profile web add dsh-llm-newapi        # stable: npm latest (auto-follows confirmed releases)
-# dsh plugin --profile web add dsh-llm-newapi@next  # prerelease
-
-# then: register the bundle — edit $DSH_HOME/profiles/web/package.json
-#       (default ~/.dsh/profiles/web/package.json),
-#       add "dsh-llm-newapi" to the dsh.profile.bundles array — and restart dsh web
+dsh plugin --profile web add github:zhyRRrr/dsh-llm-newapi
 ```
 
-### Option B: GitHub shorthand — `#latest` (moving) or `#vX.Y.Z` (pinned)
+Confirm `dsh-llm-newapi` is present in `dsh.profile.bundles` in the web profile package:
+
+```text
+Windows: %USERPROFILE%\.dsh\profiles\web\package.json
+Linux/macOS: ~/.dsh/profiles/web/package.json
+```
+
+Restart dsh web after the install. In Windows Command Prompt:
+
+```bat
+for /f "tokens=5" %a in ('netstat -ano ^| findstr :3080 ^| findstr LISTENING') do taskkill /F /PID %a
+start "" /b dsh web --host 127.0.0.1 --port 3080
+```
+
+### Local development
 
 ```sh
-dsh plugin --profile web add "github:wenzetan/dsh-llm-newapi#latest"    # newest confirmed stable
-# dsh plugin --profile web add "github:wenzetan/dsh-llm-newapi#v0.8.1"  # exact version
-# Same bundle registration & restart as Option A
+git clone https://github.com/zhyRRrr/dsh-llm-newapi.git
+cd dsh-llm-newapi
+npm install
+npm run build
+npm test
 ```
 
-### Option C: Release tarball (no GitHub clone)
+In Windows Command Prompt, install a local checkout with an absolute path:
 
-```sh
-dsh plugin --profile web add \
-  https://github.com/wenzetan/dsh-llm-newapi/releases/download/v0.8.1/dsh-llm-newapi-0.8.1.tgz
-# Same bundle registration & restart; use the matching -rc.N asset for prereleases
+```bat
+dsh plugin --profile web add link:E:\EducationApp\dsh-llm-newapi
 ```
 
-### Option D: local development (link)
-
-```sh
-git clone https://github.com/wenzetan/dsh-llm-newapi && cd dsh-llm-newapi
-npm install && npm run build && npm test
-dsh plugin --profile web add link:$(pwd)
-# Same bundle registration & restart; after changing code re-run npm run build, commit lib/ and restart dsh web
-```
+The compiled `lib/` directory is committed because GitHub installs run `lib/index.js` and `lib/client.js`. Run `npm run build` before pushing source changes.
 
 > **Missing-peer warnings at install time are expected and can be ignored**: `react`/`cordis`/`dsh-llm`/`dsh-settings`/`schemastery` etc. are provided at runtime by the dsh host app; declaring them as `peerDependencies` is exactly how the plugin says "don't install your own copy". The profile's `autoInstallPeers: false` makes pnpm report them as missing. Every dsh plugin shows this WARN on install (dsh-at-file is the same); installation succeeds regardless. Do not install that list manually or enable autoInstallPeers — it causes duplicate cordis services and the plugin silently failing.
 
-After install: a "NewAPI" page appears in the settings panel → fill in the API key and the gateway address (including `/v1`) → "Fetch model info" pulls the model list and lets you pick chat models (embedding / rerank / ranker are filtered automatically) → save. The `newapi` route's models then show up in the model picker (composer).
+## Web setup
 
-## Configuration (cordis.yml entry config; after install the `llm-newapi:` section in settings.yaml hot-reloads and overrides it)
+After restarting, open dsh settings and select the **NewAPI** page.
+
+1. Select a saved channel in the top **Channel** dropdown, or click **Add channel**.
+2. Enter its API key and paste the gateway base URL, usually ending in `/v1`.
+3. The hostname fills Provider ID and Display name automatically; both are editable. Provider IDs use lowercase `a-z`, `0-9`, and `-` and must be unique.
+4. Select **OpenAI protocol** or **Anthropic protocol**.
+5. Under OpenAI choose **Chat Completions** or **Responses**. Under Anthropic choose **Messages**.
+6. Click **Fetch models**, select the needed models, then click **Save**.
+
+All saved channels are registered at once, each with separate models, protocol, gateway URL, provider route, and API key.
+
+## YAML configuration
 
 ```yaml
 - id: llm-newapi
   name: dsh-llm-newapi
   config:
     baseURL: http://gw.local:3000/v1   # include the /v1 prefix; falls back to env NEWAPI_BASE_URL → placeholder
+    protocol: responses                 # legacy single-channel form; channels below support multiple gateways
+    # channels:                        # each channel registers its own provider route and credential
+    #   - provider: x-ailzd-com         # optional; defaults from the gateway hostname
+    #     displayName: x.ailzd.com       # optional; defaults to the gateway hostname
+    #     baseURL: https://x.ailzd.com/v1
+    #     protocol: responses            # chat-completions, responses, or anthropic-messages
+    #   - baseURL: https://api.example.com/v1  # provider becomes api-example-com
     # models:                          # suggested catalog; empty by default, use "Fetch model info" to pull /models
     #   - id: deepseek-chat
     #     contextWindow: 65536
@@ -87,9 +95,15 @@ After install: a "NewAPI" page appears in the settings panel → fill in the API
     #     tencent/Hunyuan-MT-7B: nano-gpt
 ```
 
-**API key**: not a config item — it lives under the fixed `newapi` reference in the credentials store, and its only configuration surface is the web settings page (takes effect immediately on write, resolved per request). The plugin never reads the key from environment variables: the top read-only layer of the credentials service is inherited from the environment, so a `NEWAPI_API_KEY`-style reference would be shadowed by an identically-named env var and lock the front-end input; hence the fixed reference name `newapi`. Without a key, the first request fails with `MISSING_CREDENTIAL` and points to the settings page — it never errors at load time.
+**API keys**: the legacy single channel uses credentials reference `newapi`. Additional channels use `newapi_<provider>`; for example, provider `api-example-com` uses `newapi_api_example_com`. Enter each key in the selected channel's web settings page. Keys are resolved per request and are never echoed by the plugin.
 
-**Model discovery**: `GET {baseURL}/models`; only models that can serve chat-completions are adopted — embedding / rerank / ranker families are filtered by naming convention (configurable).
+**Generation protocols**: `protocol: chat-completions` is the backward-compatible default and sends `POST {baseURL}/chat/completions` with Bearer auth. `protocol: responses` sends `POST {baseURL}/responses` and translates Responses SSE events. `protocol: anthropic-messages` sends `POST {baseURL}/messages` with `x-api-key` and `anthropic-version: 2023-06-01`, serializing tool calls as Anthropic `tool_use`/`tool_result` blocks. Keep `baseURL` at the gateway root (normally ending in `/v1`); a pasted `/chat/completions`, `/responses`, or `/messages` suffix is normalized away.
+
+**Model discovery**: `GET {baseURL}/models` for all generation protocols. The gateway listing has no reliable capability flags, so embedding / rerank / ranker families are filtered by naming convention (configurable).
+
+**Multiple channels**: set `channels` to register several gateways at once. Each entry gets an independent provider route, model catalog, protocol, and credential reference (`newapi` for the legacy route, otherwise `newapi_<provider>`). The web settings page lets you switch channels from the top dropdown; when a URL is pasted, the hostname fills Provider ID and display name until the user edits either field.
+
+**Repository**: install from [zhyRRrr/dsh-llm-newapi](https://github.com/zhyRRrr/dsh-llm-newapi). Before pushing updates, run `npm run typecheck`, `npm run build`, and `npm test`; commit generated `lib/` output, but do not commit local `verification` backups or machine-specific settings files.
 
 **Web settings page**: discovered at runtime by dsh web through the `dsh.client` manifest (`ClientModuleRegistry` scans composition plugin lines), contributing a `settings.section` slot (dsh contract: features own their settings page, no shell changes). Note it is a standalone "NewAPI" page in the settings panel, not embedded inside the official Models page. Inputs and buttons all use `--dsw-alias-*` design tokens (same recipe as the official Models page), adapting automatically to light / dark themes.
 

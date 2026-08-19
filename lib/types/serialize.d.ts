@@ -11,7 +11,7 @@
  * @module dsh-llm-newapi/serialize
  */
 import type { GenerateOptions, Message } from '@deepseek-ai/dsh-llm';
-import type { WireMessage, WireRequest } from './types.js';
+import type { AnthropicRequest, ResponsesRequest, WireMessage, WireRequest } from './types.js';
 /**
  * Serialize the conversation. `tool-result` blocks become standalone
  * `{role: 'tool'}` messages; the harness puts each tool result in its own
@@ -32,3 +32,7 @@ export declare function serializeMessages(messages: Message[]): WireMessage[];
  * @returns the chat-completions request body.
  */
 export declare function serializeRequest(options: GenerateOptions): WireRequest;
+/** Serialize the same harness conversation for the OpenAI Responses API. */
+export declare function serializeResponsesRequest(options: GenerateOptions): ResponsesRequest;
+/** Serialize the harness conversation for Anthropic Messages. */
+export declare function serializeAnthropicRequest(options: GenerateOptions): AnthropicRequest;

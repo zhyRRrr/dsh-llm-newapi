@@ -302,6 +302,30 @@ function stubModelsListing() {
   )
 }
 
+// ── Block B2: multiple channels register simultaneously and keep identity ──
+{
+  const derived = plugin.resolveAdapterChannels({ channels: [{ baseURL: 'https://api.acme-gateway.example/v1' }] })
+  assert.equal(derived[0].provider, 'api-acme-gateway-example')
+  assert.equal(derived[0].displayName, 'api.acme-gateway.example')
+
+  const ctx = new Context()
+  await ctx.plugin(LlmRuntime)
+  const fiber = await mountPlugin(ctx, {
+    channels: [
+      { provider: 'first-gateway', displayName: 'First Gateway', baseURL: 'http://first.example/v1', protocol: 'chat-completions', models: [{ id: 'first-model' }] },
+      { provider: 'second-gateway', displayName: 'Second Gateway', baseURL: 'http://second.example/v1', protocol: 'anthropic-messages', models: [{ id: 'second-model' }] },
+    ],
+  })
+  assert.deepEqual(ctx.llm.listProviders().map(provider => ({ id: provider.id, name: provider.name })), [
+    { id: 'first-gateway', name: 'First Gateway' },
+    { id: 'second-gateway', name: 'Second Gateway' },
+  ])
+  assert.deepEqual(ctx.llm.listConfigurableProviders().map(provider => provider.provider), ['first-gateway', 'second-gateway'])
+  assert.deepEqual((await ctx.llm.listModels('first-gateway')).map(model => model.id), ['first-model'])
+  assert.deepEqual((await ctx.llm.listModels('second-gateway')).map(model => model.id), ['second-model'])
+  await fiber.dispose()
+}
+
 // ── Block E: the models-dev RPC channel registers once connection starts ──
 {
   const ctx = new Context()
@@ -522,4 +546,138 @@ function stubModelsListing() {
   }
 }
 
-console.log('smoke: llm-newapi registrations, chat-only discovery, credentials-service key, settings validation, ordering, display names, models.dev matching, deferred RPC channel, dead-proxy diagnostics, and empty-string tool-call delta hardening OK')
+// ── Block I: selectable Responses protocol ──
+{
+  const defaultConnection = plugin.resolveAdapterOptions({ baseURL: 'http://gw.local:3000/v1' })
+  assert.equal(defaultConnection.protocol, 'chat-completions')
+  assert.equal(plugin.normalizeBaseUrl('http://gw.local:3000/v1/responses/'), 'http://gw.local:3000/v1')
+
+  const adapter = new plugin.NewApiAdapter({
+    options: () => ({
+      baseURL: 'http://gw.local:3000/v1',
+      protocol: 'responses',
+      apiKeyRef: 'newapi',
+      models: [],
+      modelExcludePatterns: [],
+      defaultContextWindow: 128_000,
+      streamIdleTimeoutMs: 300_000,
+      retryPolicy: resolveRetryPolicy(undefined, 'smoke'),
+    }),
+    resolveApiKey: async () => 'smoke-key',
+  })
+  const sse = [
+    'event: response.output_item.added\n',
+    `data: ${JSON.stringify({ item: { id: 'fc_item_1', type: 'function_call', call_id: 'call_1', name: 'get_time', arguments: '' } })}\n\n`,
+    'event: response.function_call_arguments.delta\n',
+    `data: ${JSON.stringify({ item_id: 'fc_item_1', delta: '{"zone":"Asia/Shanghai"}' })}\n\n`,
+    'event: response.output_text.delta\n',
+    `data: ${JSON.stringify({ delta: 'Checking time.' })}\n\n`,
+    'event: response.completed\n',
+    `data: ${JSON.stringify({ response: { status: 'completed', usage: { input_tokens: 12, input_tokens_details: { cached_tokens: 2 }, output_tokens: 5 } } })}\n\n`,
+  ].join('')
+  const originalFetch = globalThis.fetch
+  const asked = { url: '', body: undefined }
+  globalThis.fetch = async (url, init) => {
+    asked.url = String(url)
+    asked.body = JSON.parse(String(init?.body))
+    return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+  let chunks
+  try {
+    chunks = []
+    for await (const chunk of adapter.stream({
+      model: 'gpt-5', system: 'Be concise.', maxTokens: 256,
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'What time is it?' }] }],
+    })) chunks.push(chunk)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.equal(asked.url, 'http://gw.local:3000/v1/responses')
+  assert.deepEqual(asked.body, {
+    model: 'gpt-5', input: [{ type: 'message', role: 'user', content: 'What time is it?' }],
+    stream: true, instructions: 'Be concise.', max_output_tokens: 256,
+  })
+  const tool = chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call')?.block
+  assert.deepEqual(tool, { type: 'tool-call', id: 'call_1', name: 'get_time', arguments: '{"zone":"Asia/Shanghai"}' })
+  assert.ok(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'Checking time.'))
+  assert.deepEqual(chunks.find(chunk => chunk.type === 'usage'), {
+    type: 'usage', usage: { inputTokens: 10, cacheReadTokens: 2, outputTokens: 5 },
+  })
+  assert.equal(chunks.at(-1).reason.kind, 'tool-calls')
+}
+
+// ── Block J: Anthropic Messages protocol ──
+{
+  const adapter = new plugin.NewApiAdapter({
+    options: () => ({
+      baseURL: 'http://gw.local:3000/v1',
+      protocol: 'anthropic-messages',
+      apiKeyRef: 'newapi',
+      models: [],
+      modelExcludePatterns: [],
+      defaultContextWindow: 128_000,
+      streamIdleTimeoutMs: 300_000,
+      retryPolicy: resolveRetryPolicy(undefined, 'smoke'),
+    }),
+    resolveApiKey: async () => 'anthropic-key',
+  })
+  const sse = [
+    'event: message_start\n',
+    `data: ${JSON.stringify({ type: 'message_start', message: { usage: { input_tokens: 17 } } })}\n\n`,
+    'event: content_block_start\n',
+    `data: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } })}\n\n`,
+    'event: content_block_delta\n',
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello from Claude.' } })}\n\n`,
+    'event: content_block_stop\n',
+    `data: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`,
+    'event: content_block_start\n',
+    `data: ${JSON.stringify({ type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_1', name: 'get_time', input: {} } })}\n\n`,
+    'event: content_block_delta\n',
+    `data: ${JSON.stringify({ type: 'content_block_delta', index: 1, delta: { type: 'input_json_delta', partial_json: '{"tz":"Asia/Shanghai"}' } })}\n\n`,
+    'event: content_block_stop\n',
+    `data: ${JSON.stringify({ type: 'content_block_stop', index: 1 })}\n\n`,
+    'event: message_delta\n',
+    `data: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 9 } })}\n\n`,
+    'event: message_stop\n',
+    `data: ${JSON.stringify({ type: 'message_stop' })}\n\n`,
+  ].join('')
+  const originalFetch = globalThis.fetch
+  const asked = { url: '', headers: undefined, body: undefined }
+  globalThis.fetch = async (url, init) => {
+    asked.url = String(url)
+    asked.headers = Object.fromEntries(new Headers(init?.headers).entries())
+    asked.body = JSON.parse(String(init?.body))
+    return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+  }
+  let chunks
+  try {
+    chunks = []
+    for await (const chunk of adapter.stream({
+      model: 'claude-sonnet', system: 'Answer briefly.',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'What time is it?' }] }],
+      tools: [{ name: 'get_time', description: 'Get current time', parameters: { type: 'object' } }],
+    })) chunks.push(chunk)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+  assert.equal(asked.url, 'http://gw.local:3000/v1/messages')
+  assert.equal(asked.headers['x-api-key'], 'anthropic-key')
+  assert.equal(asked.headers['anthropic-version'], '2023-06-01')
+  assert.equal(asked.headers.authorization, undefined)
+  assert.deepEqual(asked.body, {
+    model: 'claude-sonnet', max_tokens: 8192,
+    system: 'Answer briefly.', stream: true,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'What time is it?' }] }],
+    tools: [{ name: 'get_time', description: 'Get current time', input_schema: { type: 'object' } }],
+  })
+  assert.ok(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'Hello from Claude.'))
+  assert.deepEqual(chunks.find(chunk => chunk.type === 'block-end' && chunk.block.type === 'tool-call')?.block, {
+    type: 'tool-call', id: 'toolu_1', name: 'get_time', arguments: '{"tz":"Asia/Shanghai"}',
+  })
+  assert.deepEqual(chunks.find(chunk => chunk.type === 'usage'), {
+    type: 'usage', usage: { inputTokens: 17, outputTokens: 9 },
+  })
+  assert.equal(chunks.at(-1).reason.kind, 'tool-calls')
+}
+
+console.log('smoke: llm-newapi registrations, model discovery, credentials-service key, OpenAI/Responses/Anthropic protocols, settings validation, ordering, display names, models.dev matching, deferred RPC channel, dead-proxy diagnostics, and tool-call delta hardening OK')

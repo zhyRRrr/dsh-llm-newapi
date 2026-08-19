@@ -89,6 +89,88 @@ describe('NewApiSection mount', () => {
     await waitFor(() => { expect(screen.getByText(new RegExp('not registered'))).toBeTruthy() })
     expect(screen.getByText(t('retry'))).toBeTruthy()
   })
+
+  it('loads and saves the selected generation protocol', async () => {
+    const api = wireFace({
+      describeAnswer: {
+        writable: true,
+        hasDocument: true,
+        namespaces: [{
+          ns: 'llm-newapi', schema: {}, value: { baseURL: 'http://gw.local:3000/v1', protocol: 'responses', models: [] },
+          applies: 'live', secrets: [], revision: 7,
+        }],
+      },
+    })
+    render(<NewApiSection api={api as never} t={t} />)
+
+    const protocol = await waitFor(() => screen.getByLabelText(t('protocol'))) as HTMLSelectElement
+    expect(protocol.value).toBe('responses')
+    fireEvent.change(protocol, { target: { value: 'chat-completions' } })
+    fireEvent.click(screen.getByText(t('apply')))
+
+    await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
+    const op = api.settings.mutate.mock.calls[0][0].ops
+      .find((entry: { path: string[] }) => entry.path[0] === 'channels')
+    expect(op.value[0].protocol).toBe('chat-completions')
+  })
+
+  it('switches between the large OpenAI and Anthropic protocol tabs', async () => {
+    const api = wireFace()
+    render(<NewApiSection api={api as never} t={t} />)
+
+    await waitFor(() => { expect(screen.getByRole('tab', { name: t('protocolOpenAI') })).toBeTruthy() })
+    fireEvent.click(screen.getByRole('tab', { name: t('protocolAnthropic') }))
+    expect((screen.getByLabelText(t('protocol')) as HTMLSelectElement).value).toBe('anthropic-messages')
+    expect(screen.getByRole('tab', { name: t('protocolAnthropic') }).getAttribute('aria-selected')).toBe('true')
+
+    fireEvent.click(screen.getByRole('tab', { name: t('protocolOpenAI') }))
+    expect((screen.getByLabelText(t('protocol')) as HTMLSelectElement).value).toBe('chat-completions')
+  })
+
+  it('keeps multiple channels and derives the provider identity from a pasted gateway URL', async () => {
+    const api = wireFace({
+      describeAnswer: {
+        writable: true,
+        hasDocument: true,
+        namespaces: [{
+          ns: 'llm-newapi', schema: {},
+          value: {
+            channels: [
+              { provider: 'first-gateway', displayName: 'First Gateway', baseURL: 'https://first.example/v1', protocol: 'responses', models: [{ id: 'one' }] },
+              { provider: 'second-gateway', displayName: 'Second Gateway', baseURL: 'https://second.example/v1', protocol: 'anthropic-messages', models: [{ id: 'two' }] },
+            ],
+          },
+          applies: 'live', secrets: [], revision: 7,
+        }],
+      },
+    })
+    render(<NewApiSection api={api as never} t={t} />)
+
+    const channel = await waitFor(() => screen.getByLabelText(t('channel'))) as HTMLSelectElement
+    expect(channel.options).toHaveLength(2)
+    fireEvent.change(channel, { target: { value: '1' } })
+    await waitFor(() => { expect((screen.getByLabelText(t('providerId')) as HTMLInputElement).value).toBe('second-gateway') })
+    expect((screen.getByLabelText(t('protocol')) as HTMLSelectElement).value).toBe('anthropic-messages')
+
+    fireEvent.click(screen.getByText(t('addChannel')))
+    fireEvent.change(screen.getByLabelText(t('baseUrl')), { target: { value: 'https://api.acme-gateway.example/v1' } })
+    expect((screen.getByLabelText(t('providerId')) as HTMLInputElement).value).toBe('api-acme-gateway-example')
+    expect((screen.getByLabelText(t('providerName')) as HTMLInputElement).value).toBe('api.acme-gateway.example')
+    fireEvent.click(screen.getByText(t('apply')))
+
+    await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
+    const saved = api.settings.mutate.mock.calls[0][0].ops
+      .find((op: { path: string[] }) => op.path[0] === 'channels').value
+    expect(saved).toHaveLength(3)
+    expect(saved[0].provider).toBe('first-gateway')
+    expect(saved[1].provider).toBe('second-gateway')
+    expect(saved[2]).toMatchObject({
+      provider: 'api-acme-gateway-example',
+      displayName: 'api.acme-gateway.example',
+      baseURL: 'https://api.acme-gateway.example/v1',
+      protocol: 'chat-completions',
+    })
+  })
 })
 
 describe('environment-supplied credential (read-only)', () => {
@@ -167,7 +249,7 @@ describe('models.dev params update', () => {
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
     const models = api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
+      .find((op: { path: string[] }) => op.path[0] === 'channels').value[0].models
     expect(models[0]).toEqual({ id: 'deepseek-chat', contextWindow: 128_000, maxTokens: 8_192, reasoningEfforts: ['low', 'medium', 'high'] })
     expect(models[1]).toEqual({ id: 'qwen/qwen-max', contextWindow: 262_144, maxTokens: 32_768 })
     expect(models[2]).toEqual({ id: 'mystery-model' })
@@ -187,7 +269,7 @@ describe('models.dev params update', () => {
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
     const models = api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
+      .find((op: { path: string[] }) => op.path[0] === 'channels').value[0].models
     expect(models[0]).toEqual({ id: 'deepseek-chat', contextWindow: 65_536, maxTokens: 8_192, reasoningEfforts: ['low', 'medium', 'high'] })
   })
 
@@ -247,7 +329,7 @@ describe('model catalog', () => {
   /** The models op of the first mutate call. */
   function savedModels(api: ReturnType<typeof wireFace>): Array<Record<string, unknown>> {
     return api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
+      .find((op: { path: string[] }) => op.path[0] === 'channels').value[0].models
   }
 
   it('folds capacities behind the row disclosure and adopts K/M entry', async () => {
@@ -298,7 +380,7 @@ describe('model catalog', () => {
     fireEvent.click(screen.getByText(t('apply')))
     await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
     const models = api.settings.mutate.mock.calls[0][0].ops
-      .find((op: { path: string[] }) => op.path[0] === 'models').value
+      .find((op: { path: string[] }) => op.path[0] === 'channels').value[0].models
     expect(models).toEqual([])
   })
 

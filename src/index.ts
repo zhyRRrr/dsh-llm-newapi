@@ -15,7 +15,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
-import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
+import type { LlmConfigurableProvider, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
@@ -29,7 +29,7 @@ import {
   PKG,
 } from './adapter.ts'
 import type { NewApiCatalogModel, NewApiConnectionOptions } from './adapter.ts'
-import type { ModelsDevParamsRequest, ProviderHints } from './types.ts'
+import type { ModelsDevParamsRequest, NewApiProtocol, ProviderHints } from './types.ts'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 
 export {
@@ -43,7 +43,7 @@ export {
   normalizeBaseUrl,
   PKG,
 } from './adapter.ts'
-export { serializeRequest } from './serialize.ts'
+export { serializeRequest, serializeResponsesRequest, serializeAnthropicRequest } from './serialize.ts'
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.ts'
 export type * from './types.ts'
 
@@ -67,6 +67,20 @@ export const DEFAULT_BASE_URL = 'https://newapi.example.com/v1'
 /** The single provider route this plugin owns. */
 const PROVIDER = 'newapi'
 
+export interface ChannelConfig {
+  provider?: string
+  displayName?: string
+  baseURL?: string
+  protocol?: NewApiProtocol
+  apiKeyRef?: string
+  models?: NewApiCatalogModel[]
+  modelExcludePatterns?: string[]
+  defaultContextWindow?: number
+  maxTokens?: number
+  streamIdleTimeoutMs?: number
+  retryPolicy?: RetryPolicyConfig
+}
+
 /**
  * Plugin config, validated by the same-named schemastery schema and doubling
  * as the `llm-newapi` settings-section shape. Every field is optional in
@@ -81,6 +95,8 @@ const PROVIDER = 'newapi'
 export interface Config {
   /** Gateway base including the `/v1` prefix; defaults to $NEWAPI_BASE_URL from a trusted layer, then the placeholder `https://newapi.example.com/v1`. */
   baseURL?: string
+  /** Wire protocol for model requests; chat-completions preserves the legacy default. */
+  protocol?: NewApiProtocol
   /** Advisory models shown by discovery consumers; defaults to none — a gateway's model set is deployment-specific. */
   models?: NewApiCatalogModel[]
   /**
@@ -112,6 +128,8 @@ export interface Config {
   providerHints?: ProviderHints
   /** Provider-owned model-request retry policy; omission uses normal defaults. */
   retryPolicy?: RetryPolicyConfig
+  /** Multiple independently routed gateway channels. When present, this replaces the legacy single channel. */
+  channels?: ChannelConfig[]
 }
 
 /** Forward-proxy settings for the models.dev catalog download. */
@@ -132,6 +150,20 @@ const catalogModel: z<NewApiCatalogModel> = z.object({
   defaultReasoningEffort: z.string(),
 })
 
+const channelSchema: z<ChannelConfig> = z.object({
+  provider: z.string(),
+  displayName: z.string(),
+  baseURL: z.string(),
+  protocol: z.union(['chat-completions', 'responses', 'anthropic-messages']),
+  apiKeyRef: z.string(),
+  models: z.array(catalogModel),
+  modelExcludePatterns: z.array(z.string()),
+  defaultContextWindow: z.number().step(1).min(1),
+  maxTokens: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER),
+  streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS),
+  retryPolicy: RetryPolicySchema,
+})
+
 /** Default forward proxy: the conventional Clash port on loopback. */
 export const DEFAULT_PROXY_URL = 'http://127.0.0.1:7890'
 
@@ -142,6 +174,7 @@ const proxySchema: z<ProxyConfig> = z.object({
 
 export const Config: z<Config> = z.object({
   baseURL: z.string(),
+  protocol: z.union(['chat-completions', 'responses', 'anthropic-messages']).default('chat-completions'),
   models: z.array(catalogModel).default([]),
   modelExcludePatterns: z.array(z.string()).default([...DEFAULT_MODEL_EXCLUDE_PATTERNS]),
   defaultContextWindow: z.number().step(1).min(1).default(DEFAULT_CONTEXT_WINDOW),
@@ -153,6 +186,7 @@ export const Config: z<Config> = z.object({
     models: z.object({}),
   }),
   retryPolicy: RetryPolicySchema,
+  channels: z.array(channelSchema).default([]),
 })
 
 /**
@@ -216,7 +250,19 @@ function resolveModels(models: readonly NewApiCatalogModel[] | undefined): NewAp
  * the product CLI. A trusted layer may supply the gateway endpoint.
  * @returns validated connection facts plus the credential reference.
  */
-export function resolveAdapterOptions(config: Config, environment?: ReturnType<typeof launchEnvironmentOf>): ResolvedNewApiOptions {
+function resolveSingleAdapterOptions(config: Config, environment: ReturnType<typeof launchEnvironmentOf> | undefined, channel?: ChannelConfig): ResolvedNewApiOptions {
+  const source: Config = channel === undefined ? config : {
+    ...config,
+    ...channel.baseURL === undefined ? {} : { baseURL: channel.baseURL },
+    ...channel.protocol === undefined ? {} : { protocol: channel.protocol },
+    ...channel.models === undefined ? {} : { models: channel.models },
+    ...channel.modelExcludePatterns === undefined ? {} : { modelExcludePatterns: channel.modelExcludePatterns },
+    ...channel.defaultContextWindow === undefined ? {} : { defaultContextWindow: channel.defaultContextWindow },
+    ...channel.maxTokens === undefined ? {} : { maxTokens: channel.maxTokens },
+    ...channel.streamIdleTimeoutMs === undefined ? {} : { streamIdleTimeoutMs: channel.streamIdleTimeoutMs },
+    ...channel.retryPolicy === undefined ? {} : { retryPolicy: channel.retryPolicy },
+  }
+  config = source
   // Absent everywhere is the placeholder, not a load failure: the plugin stays
   // mountable so configuration surfaces can offer the route, and a request
   // against the placeholder fails as TRANSPORT at first use, naming the
@@ -260,8 +306,11 @@ export function resolveAdapterOptions(config: Config, environment?: ReturnType<t
     }
   }
   return {
+    provider: channel?.provider ?? PROVIDER,
+    displayName: channel?.displayName ?? 'NewAPI',
     baseURL: normalizeBaseUrl(rawBase),
-    apiKeyRef: credentialRef(API_KEY_REF),
+    protocol: config.protocol ?? 'chat-completions',
+    apiKeyRef: credentialRef(channel?.apiKeyRef ?? (channel?.provider === undefined || channel.provider === PROVIDER ? API_KEY_REF : `newapi_${channel.provider.replaceAll('-', '_')}`)),
     models: resolveModels(config.models),
     modelExcludePatterns,
     defaultContextWindow,
@@ -276,15 +325,61 @@ export function resolveAdapterOptions(config: Config, environment?: ReturnType<t
   }
 }
 
+function providerFromUrl(raw: string): string {
+  try {
+    const hostname = new URL(normalizeBaseUrl(raw)).hostname.toLowerCase()
+    const value = hostname.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    return value.length > 0 ? value : PROVIDER
+  } catch {
+    return PROVIDER
+  }
+}
+
+function displayNameFromUrl(raw: string): string {
+  try { return new URL(normalizeBaseUrl(raw)).hostname }
+  catch { return 'NewAPI' }
+}
+
+function resolvedChannels(config: Config, environment?: ReturnType<typeof launchEnvironmentOf>): ResolvedNewApiOptions[] {
+  const channels = config.channels ?? []
+  if (channels.length === 0) return [resolveSingleAdapterOptions(config, environment)]
+  const used = new Set<string>()
+  return channels.map((channel, index) => {
+    const baseURL = channel.baseURL ?? config.baseURL ?? DEFAULT_BASE_URL
+    const derived = providerFromUrl(baseURL)
+    const provider = channel.provider?.trim() || derived
+    if (!/^[a-z][a-z0-9-]*$/.test(provider)) {
+      throw new Error(`${PKG}: channel provider "${provider}" must start with a lowercase letter and contain only a-z, 0-9, or -`)
+    }
+    if (used.has(provider)) throw new Error(`${PKG}: duplicate channel provider "${provider}"`)
+    used.add(provider)
+    const normalized: ChannelConfig = {
+      ...channel,
+      provider,
+      displayName: channel.displayName?.trim() || displayNameFromUrl(baseURL),
+      baseURL,
+    }
+    return resolveSingleAdapterOptions(config, environment, normalized)
+  })
+}
+
+export function resolveAdapterOptions(config: Config, environment?: ReturnType<typeof launchEnvironmentOf>): ResolvedNewApiOptions {
+  return resolvedChannels(config, environment)[0]!
+}
+
+export function resolveAdapterChannels(config: Config, environment?: ReturnType<typeof launchEnvironmentOf>): ResolvedNewApiOptions[] {
+  return resolvedChannels(config, environment)
+}
+
 export function apply(ctx: Context, config: Config): void {
   let current: () => Config = () => config
   let lastRaw: Config | undefined
-  let lastGood: ResolvedNewApiOptions | undefined
-  const options = (): ResolvedNewApiOptions => {
+  let lastGood: ResolvedNewApiOptions[] | undefined
+  const options = (): ResolvedNewApiOptions[] => {
     const raw = current()
     if (raw === lastRaw && lastGood !== undefined) return lastGood
     try {
-      const next = resolveAdapterOptions(raw, launchEnvironmentOf(ctx))
+      const next = resolvedChannels(raw, launchEnvironmentOf(ctx))
       lastRaw = raw
       lastGood = next
       return next
@@ -299,7 +394,11 @@ export function apply(ctx: Context, config: Config): void {
       return lastGood
     }
   }
-  options()
+  const initial = options()
+  const optionFor = (provider?: string): ResolvedNewApiOptions => {
+    const all = options()
+    return all.find(connection => connection.provider === provider) ?? all[0]!
+  }
 
   const resolveApiKey = async (connection: ResolvedNewApiOptions): Promise<string> => {
     // Every credential fact comes from the caller's snapshot, so a rejected
@@ -314,7 +413,7 @@ export function apply(ctx: Context, config: Config): void {
       if (hit !== undefined) return assertUsableApiKey(hit.value, PKG, ref)
     }
     throw new LlmError(
-      `${PKG}: no API key for provider route "${PROVIDER}"; configure it on the NewAPI`
+      `${PKG}: no API key for provider route "${connection.provider}"; configure it on the NewAPI`
         + ` settings page in dsh web (credentials reference "${ref}")`,
       'MISSING_CREDENTIAL',
     )
@@ -331,7 +430,7 @@ export function apply(ctx: Context, config: Config): void {
     if (indexCache === undefined || indexCache.routes !== routes) {
       const byModel = new Map<string, string>()
       for (const provider of ctx.llm.listProviders()) {
-        if (provider.id === PROVIDER) continue
+        if (options().some(connection => connection.provider === provider.id)) continue
         try {
           for (const model of await ctx.llm.listModels(provider.id)) {
             byModel.set(model.id, provider.id)
@@ -345,32 +444,31 @@ export function apply(ctx: Context, config: Config): void {
     return indexCache.byModel.get(modelId)
   }
 
-  const adapter = new NewApiAdapter({ options, resolveApiKey, officialProviderOf })
-  ctx.llm.registerConfigurableProviders([
-    {
-      provider: PROVIDER,
-      displayName: 'NewAPI',
+  const adapter = new NewApiAdapter({ options: optionFor, resolveApiKey, officialProviderOf })
+  const directoryEntries = (connections: readonly ResolvedNewApiOptions[]): LlmConfigurableProvider[] =>
+    connections.map(connection => ({
+      provider: connection.provider,
+      displayName: connection.displayName,
       settingsNs: NS,
       settingsPath: [],
-      // The adapter knows this route only because configuration declared it:
-      // a self-hosted gateway it ships nothing about.
       declared: true,
-    },
-  ])
+    }))
+  const directory = ctx.llm.registerConfigurableProviders(directoryEntries(initial))
   // Route effects bind to this apply fiber via the stable `ctx` reference,
   // even when a swap runs inside the scoped settings callback below.
-  const registration = ctx.llm.registerAdapter([PROVIDER], adapter)
-  let registeredPolicy = options().retryPolicy
+  const registration = ctx.llm.registerAdapter(initial.map(connection => connection.provider), adapter)
+  let registered = initial
   const ensureRegistrationFacts = (): void => {
-    const policy = options().retryPolicy
-    if (deepEqualJson(policy, registeredPolicy)) return
+    const next = options()
+    if (deepEqualJson(next, registered)) return
     // The registry captures the retry policy at registration, so it is the one
     // fact per-request resolution cannot refresh. `replace` re-reads it in one
     // synchronous registry section: disposing and re-registering instead would
     // publish an empty route set between the two, and an observer that reacted
     // to it would see this provider disappear and come back.
-    registration.replace([PROVIDER])
-    registeredPolicy = policy
+    directory.replace(directoryEntries(next))
+    registration.replace(next.map(connection => connection.provider))
+    registered = next
   }
   // Model discovery for the settings namespace this plugin owns: the Models
   // page interrogates the gateway's /models with the draft's endpoint and
@@ -422,7 +520,7 @@ export function apply(ctx: Context, config: Config): void {
     // an empty exclude-pattern entry) stores with a success notice and
     // then silently keeps the last good facts at every request.
     validate: (value) => {
-      resolveAdapterOptions(value, launchEnvironmentOf(ctx))
+      resolvedChannels(value, launchEnvironmentOf(ctx))
     },
     setSource: (source) => {
       current = source

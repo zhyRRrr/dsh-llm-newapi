@@ -16,15 +16,28 @@ import z from '@deepseek-ai/schemastery';
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm';
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment';
 import type { NewApiCatalogModel, NewApiConnectionOptions } from './adapter.js';
-import type { ProviderHints } from './types.js';
+import type { NewApiProtocol, ProviderHints } from './types.js';
 export { DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL_EXCLUDE_PATTERNS, DEFAULT_PROVIDER_HINTS, DEFAULT_STREAM_IDLE_TIMEOUT_MS, matchModelsDev, modelNameFromId, NewApiAdapter, normalizeBaseUrl, PKG, } from './adapter.js';
-export { serializeRequest } from './serialize.js';
+export { serializeRequest, serializeResponsesRequest, serializeAnthropicRequest } from './serialize.js';
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.js';
 export type * from './types.js';
 export declare const name = "llm-newapi";
 export declare const inject: string[];
 /** Placeholder gateway base used when neither config nor environment names one. */
 export declare const DEFAULT_BASE_URL = "https://newapi.example.com/v1";
+export interface ChannelConfig {
+    provider?: string;
+    displayName?: string;
+    baseURL?: string;
+    protocol?: NewApiProtocol;
+    apiKeyRef?: string;
+    models?: NewApiCatalogModel[];
+    modelExcludePatterns?: string[];
+    defaultContextWindow?: number;
+    maxTokens?: number;
+    streamIdleTimeoutMs?: number;
+    retryPolicy?: RetryPolicyConfig;
+}
 /**
  * Plugin config, validated by the same-named schemastery schema and doubling
  * as the `llm-newapi` settings-section shape. Every field is optional in
@@ -39,6 +52,8 @@ export declare const DEFAULT_BASE_URL = "https://newapi.example.com/v1";
 export interface Config {
     /** Gateway base including the `/v1` prefix; defaults to $NEWAPI_BASE_URL from a trusted layer, then the placeholder `https://newapi.example.com/v1`. */
     baseURL?: string;
+    /** Wire protocol for model requests; chat-completions preserves the legacy default. */
+    protocol?: NewApiProtocol;
     /** Advisory models shown by discovery consumers; defaults to none — a gateway's model set is deployment-specific. */
     models?: NewApiCatalogModel[];
     /**
@@ -70,6 +85,8 @@ export interface Config {
     providerHints?: ProviderHints;
     /** Provider-owned model-request retry policy; omission uses normal defaults. */
     retryPolicy?: RetryPolicyConfig;
+    /** Multiple independently routed gateway channels. When present, this replaces the legacy single channel. */
+    channels?: ChannelConfig[];
 }
 /** Forward-proxy settings for the models.dev catalog download. */
 export interface ProxyConfig {
@@ -88,15 +105,6 @@ export declare const Config: z<Config>;
  * newer key.
  */
 export type ResolvedNewApiOptions = NewApiConnectionOptions;
-/**
- * The one explicit resolve step from raw config to validated connection
- * facts. Programmatic construction may bypass Schemastery normalization, so
- * every default and bound is re-judged here — for the composition entry at
- * load (fail loud) and for each settings snapshot at its first use.
- * @param config - raw plugin config or resolved settings snapshot.
- * @param environment - this run's environment layers, or `undefined` outside
- * the product CLI. A trusted layer may supply the gateway endpoint.
- * @returns validated connection facts plus the credential reference.
- */
 export declare function resolveAdapterOptions(config: Config, environment?: ReturnType<typeof launchEnvironmentOf>): ResolvedNewApiOptions;
+export declare function resolveAdapterChannels(config: Config, environment?: ReturnType<typeof launchEnvironmentOf>): ResolvedNewApiOptions[];
 export declare function apply(ctx: Context, config: Config): void;

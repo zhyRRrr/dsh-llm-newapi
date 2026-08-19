@@ -24,6 +24,14 @@ import type { ModelsDevParamsRequest, ModelsDevParamsResponse } from './params-t
  * dropped by a rebuild.
  */
 type ModelDraft = Record<string, unknown>
+type Protocol = 'chat-completions' | 'responses' | 'anthropic-messages'
+type ChannelDraft = {
+  provider: string
+  displayName: string
+  baseURL: string
+  protocol: Protocol
+  models: ModelDraft[]
+}
 
 /** A row's text field, or the empty string when unset or not a string. */
 function textOf(model: ModelDraft, key: string): string {
@@ -141,6 +149,37 @@ function toDrafts(source: unknown): ModelDraft[] {
       : {})
 }
 
+function hostnameOf(value: string): string {
+  try { return new URL(value.trim()).hostname } catch { return '' }
+}
+
+function providerOf(value: string): string {
+  const hostname = hostnameOf(value).toLowerCase()
+  return hostname.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+}
+
+function credentialRefOf(provider: string): string {
+  return provider === KEY_REF ? KEY_REF : `newapi_${provider.replaceAll('-', '_')}`
+}
+
+function asProtocol(value: unknown): Protocol {
+  return value === 'responses' || value === 'anthropic-messages' ? value : 'chat-completions'
+}
+
+function channelFrom(value: unknown, fallback: Record<string, unknown>): ChannelDraft {
+  const legacy = value === undefined
+  const raw = typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const baseURL = typeof raw.baseURL === 'string' ? raw.baseURL : typeof fallback.baseURL === 'string' ? fallback.baseURL : ''
+  const provider = legacy ? KEY_REF : typeof raw.provider === 'string' && raw.provider.length > 0 ? raw.provider : providerOf(baseURL) || KEY_REF
+  return {
+    provider,
+    displayName: legacy ? '' : typeof raw.displayName === 'string' ? raw.displayName : hostnameOf(baseURL),
+    baseURL,
+    protocol: asProtocol(raw.protocol ?? fallback.protocol),
+    models: toDrafts(raw.models ?? fallback.models),
+  }
+}
+
 /**
  * The highest rung in a row's declared efforts — the dropdown's value when
  * no preset has been chosen yet.
@@ -173,7 +212,14 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   const [keyConfigured, setKeyConfigured] = useState<boolean | undefined>(undefined)
   /** Whether the credential seam reports the key reference read-only (launch environment). */
   const [keyLocked, setKeyLocked] = useState(false)
+  const [channels, setChannels] = useState<ChannelDraft[]>([])
+  const [activeChannel, setActiveChannel] = useState(0)
+  const [provider, setProvider] = useState(KEY_REF)
+  const [displayName, setDisplayName] = useState('')
+  const [providerTouched, setProviderTouched] = useState(false)
+  const [displayNameTouched, setDisplayNameTouched] = useState(false)
   const [baseURL, setBaseURL] = useState('')
+  const [protocol, setProtocol] = useState<Protocol>('chat-completions')
   const [keyDraft, setKeyDraft] = useState('')
   const [models, setModels] = useState<ModelDraft[]>([])
   // Rows carry an id and a name; capacities stay folded behind the row's own
@@ -223,17 +269,28 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         return
       }
       const value = (section.value ?? {}) as Record<string, unknown>
+      const stored = Array.isArray(value.channels) && value.channels.length > 0
+        ? value.channels.map(channel => channelFrom(channel, value))
+        : [channelFrom(undefined, value)]
+      const selected = stored[0]!
       setRevision(section.revision)
-      setBaseURL(typeof value.baseURL === 'string' ? value.baseURL : '')
-      setModels(toDrafts(value.models))
+      setChannels(stored)
+      setActiveChannel(0)
+      setProvider(selected.provider)
+      setDisplayName(selected.displayName)
+      setBaseURL(selected.baseURL)
+      setProtocol(selected.protocol)
+      setModels(selected.models)
+      setProviderTouched(false)
+      setDisplayNameTouched(false)
       const proxy = (value.proxy ?? {}) as { enabled?: unknown; url?: unknown }
       setProxyEnabled(proxy.enabled === true)
       if (typeof proxy.url === 'string' && proxy.url.length > 0) setProxyUrl(proxy.url)
       setExpanded(new Set())
       setEditing(new Map())
-      const credential = await api.credentials.describe({ refs: [KEY_REF] })
+      const credential = await api.credentials.describe({ refs: [credentialRefOf(selected.provider)] })
       if (credential.result.ok) {
-        const view = credential.result.value.credentials[KEY_REF]
+        const view = credential.result.value.credentials[credentialRefOf(selected.provider)]
         setKeyConfigured(view?.configured)
         setKeyLocked(view?.writable === false)
       }
@@ -253,12 +310,101 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     void load()
   }
 
+  const refreshCredential = async (nextProvider: string): Promise<void> => {
+    if (!/^[a-z][a-z0-9-]*$/.test(nextProvider)) {
+      setKeyConfigured(undefined)
+      setKeyLocked(false)
+      return
+    }
+    const ref = credentialRefOf(nextProvider)
+    const credential = await api.credentials.describe({ refs: [ref] })
+    if (!credential.result.ok) return
+    const view = credential.result.value.credentials[ref]
+    setKeyConfigured(view?.configured)
+    setKeyLocked(view?.writable === false)
+  }
+
+  const snapshot = (): ChannelDraft => ({ provider, displayName, baseURL, protocol, models })
+
+  const switchChannel = async (index: number): Promise<void> => {
+    if (index === activeChannel || channels[index] === undefined) return
+    const next = channels[index]!
+    setChannels(current => current.map((channel, at) => at === activeChannel ? snapshot() : channel))
+    setActiveChannel(index)
+    setProvider(next.provider)
+    setDisplayName(next.displayName)
+    setBaseURL(next.baseURL)
+    setProtocol(next.protocol)
+    setModels(next.models)
+    setProviderTouched(false)
+    setDisplayNameTouched(false)
+    setExpanded(new Set())
+    setEditing(new Map())
+    setCandidates(undefined)
+    setParams(undefined)
+    setKeyDraft('')
+    await refreshCredential(next.provider)
+  }
+
+  const addChannel = (): void => {
+    const committed = snapshot()
+    const taken = new Set(channels.map(channel => channel.provider))
+    let number = 2
+    while (taken.has(`channel-${String(number)}`)) number++
+    const next: ChannelDraft = {
+      provider: `channel-${String(number)}`,
+      displayName: '',
+      baseURL: '',
+      protocol: 'chat-completions',
+      models: [],
+    }
+    setChannels(current => current.map((channel, at) => at === activeChannel ? committed : channel).concat(next))
+    setActiveChannel(channels.length)
+    setProvider(next.provider)
+    setDisplayName(next.displayName)
+    setBaseURL(next.baseURL)
+    setProtocol(next.protocol)
+    setModels([])
+    setProviderTouched(false)
+    setDisplayNameTouched(false)
+    setKeyDraft('')
+    setKeyConfigured(false)
+    setKeyLocked(false)
+    setExpanded(new Set())
+    setEditing(new Map())
+  }
+
+  const removeChannel = (): void => {
+    if (channels.length <= 1) {
+      setErrorText(t('channelRequired'))
+      return
+    }
+    const remaining = channels.filter((_channel, at) => at !== activeChannel)
+    const nextIndex = Math.min(activeChannel, remaining.length - 1)
+    const next = remaining[nextIndex]!
+    setChannels(remaining)
+    setActiveChannel(nextIndex)
+    setProvider(next.provider)
+    setDisplayName(next.displayName)
+    setBaseURL(next.baseURL)
+    setProtocol(next.protocol)
+    setModels(next.models)
+    setProviderTouched(false)
+    setDisplayNameTouched(false)
+    setKeyDraft('')
+    setExpanded(new Set())
+    setEditing(new Map())
+  }
+
   /**
    * Refuse the save with a localized message when a row cannot be written:
    * an empty or duplicate id, or capacity text that does not parse. The host
    * re-judges the same constraints at the write; this names the row first.
    */
   const catalogProblem = (): string | undefined => {
+    if (!/^[a-z][a-z0-9-]*$/.test(provider.trim())) return t('providerIdInvalid')
+    const allProviders = channels.map((channel, index) => index === activeChannel ? provider.trim() : channel.provider.trim())
+    if (new Set(allProviders).size !== allProviders.length) return t('providerIdDuplicate')
     const seen = new Set<string>()
     for (const [index, model] of models.entries()) {
       const id = textOf(model, 'id').trim()
@@ -275,6 +421,28 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     return undefined
   }
 
+  const serializeModels = (source: readonly ModelDraft[]) => source.map(model => {
+    const id = textOf(model, 'id').trim()
+    const name = textOf(model, 'name').trim()
+    const contextWindow = numberOf(model, 'contextWindow')
+    const maxTokens = numberOf(model, 'maxTokens')
+    const efforts = Array.isArray(model.reasoningEfforts)
+      ? model.reasoningEfforts.filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
+      : []
+    const preset = typeof model.defaultReasoningEffort === 'string'
+      && efforts.includes(model.defaultReasoningEffort)
+      ? model.defaultReasoningEffort
+      : undefined
+    return {
+      id,
+      ...name.length > 0 ? { name } : {},
+      ...contextWindow !== undefined ? { contextWindow } : {},
+      ...maxTokens !== undefined ? { maxTokens } : {},
+      ...efforts.length > 0 ? { reasoningEfforts: efforts } : {},
+      ...preset !== undefined ? { defaultReasoningEffort: preset } : {},
+    }
+  })
+
   const save = async (): Promise<void> => {
     const problem = catalogProblem()
     if (problem !== undefined) {
@@ -286,38 +454,28 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
     setErrorText(undefined)
     try {
       const trimmedBase = baseURL.trim()
+      const currentChannel = {
+        provider: provider.trim(),
+        ...displayName.trim().length > 0 ? { displayName: displayName.trim() } : {},
+        baseURL: trimmedBase,
+        protocol,
+        models: serializeModels(models),
+      }
+      const nextChannels = channels.map((channel, index) => index === activeChannel
+        ? currentChannel
+        : {
+          provider: channel.provider.trim(),
+          ...channel.displayName.trim().length > 0 ? { displayName: channel.displayName.trim() } : {},
+          baseURL: channel.baseURL.trim(),
+          protocol: channel.protocol,
+          models: serializeModels(channel.models),
+        })
       const ops: SettingsPathOpView[] = []
-      if (trimmedBase.length > 0) ops.push({ op: 'set', path: ['baseURL'], value: trimmedBase })
-      else ops.push({ op: 'unset', path: ['baseURL'] })
+      ops.push({ op: 'set', path: ['channels'], value: nextChannels })
       ops.push({
         op: 'set',
         path: ['proxy'],
         value: { enabled: proxyEnabled, url: proxyUrl.trim().length > 0 ? proxyUrl.trim() : DEFAULT_PROXY_URL },
-      })
-      ops.push({
-        op: 'set',
-        path: ['models'],
-        value: models.map(model => {
-          const id = textOf(model, 'id').trim()
-          const name = textOf(model, 'name').trim()
-          const contextWindow = numberOf(model, 'contextWindow')
-          const maxTokens = numberOf(model, 'maxTokens')
-          const efforts = Array.isArray(model.reasoningEfforts)
-            ? model.reasoningEfforts.filter((effort): effort is string => typeof effort === 'string' && effort.length > 0)
-            : []
-          const preset = typeof model.defaultReasoningEffort === 'string'
-            && efforts.includes(model.defaultReasoningEffort)
-            ? model.defaultReasoningEffort
-            : undefined
-          return {
-            id,
-            ...name.length > 0 ? { name } : {},
-            ...contextWindow !== undefined ? { contextWindow } : {},
-            ...maxTokens !== undefined ? { maxTokens } : {},
-            ...efforts.length > 0 ? { reasoningEfforts: efforts } : {},
-            ...preset !== undefined ? { defaultReasoningEffort: preset } : {},
-          }
-        }),
       })
       const mutated = await api.settings.mutate({ ns: NS, ops, expectedRevision: revision })
       if (!mutated.result.ok) {
@@ -325,9 +483,10 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         return
       }
       setRevision(mutated.result.value.revision)
+      setChannels(nextChannels.map(channel => ({ ...channel, displayName: channel.displayName ?? '', models: toDrafts(channel.models) })))
       const key = keyDraft.trim()
       if (key.length > 0) {
-        const stored = await api.credentials.set({ ref: KEY_REF, value: key })
+        const stored = await api.credentials.set({ ref: credentialRefOf(provider.trim()), value: key })
         if (!stored.result.ok) {
           setErrorText(stored.result.error.message)
           return
@@ -350,7 +509,8 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       const key = keyDraft.trim()
       const response = await api.llm.discoverModels({
         settingsNs: NS,
-        provider: 'newapi',
+        provider: provider.trim(),
+        api: protocol,
         ...baseURL.trim().length > 0 ? { baseURL: baseURL.trim() } : {},
         ...key.length > 0 ? { apiKey: key } : {},
       })
@@ -568,6 +728,22 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       {!writable ? <p>{t('readOnly')}</p> : null}
       {errorText === undefined ? null : <p className="newapi-error">{errorText}</p>}
 
+      <div className="newapi-channelbar">
+        <label htmlFor="newapi-channel">{t('channel')}</label>
+        <select
+          id="newapi-channel" className="newapi-select" value={String(activeChannel)}
+          onChange={(event) => { void switchChannel(Number(event.target.value)) }}
+        >
+          {channels.map((channel, index) => (
+            <option key={`${channel.provider}-${String(index)}`} value={String(index)}>
+              {channel.displayName.length > 0 ? channel.displayName : channel.provider}
+            </option>
+          ))}
+        </select>
+        <button type="button" className="newapi-linkbutton" onClick={addChannel}>{t('addChannel')}</button>
+        <button type="button" className="newapi-linkbutton" disabled={channels.length <= 1} onClick={removeChannel}>{t('removeChannel')}</button>
+      </div>
+
       <div className="newapi-field">
         <label htmlFor="newapi-key">{t('keyInput')}</label>
         {/* The official ProviderEditor credential pattern: a read-only
@@ -589,8 +765,75 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
         <input
           id="newapi-base" type="text" className="newapi-input" placeholder={t('baseUrlPlaceholder')}
           value={baseURL}
-          onChange={(event) => { setBaseURL(event.target.value) }}
+          onChange={(event) => {
+            const value = event.target.value
+            setBaseURL(value)
+            const derivedProvider = providerOf(value)
+            const derivedName = hostnameOf(value)
+            if (!providerTouched && derivedProvider.length > 0) {
+              setProvider(derivedProvider)
+              void refreshCredential(derivedProvider)
+            }
+            if (!displayNameTouched && derivedName.length > 0) setDisplayName(derivedName)
+          }}
         />
+      </div>
+
+      <div className="newapi-channel-identities">
+        <label className="newapi-field">
+          <span>{t('providerId')}</span>
+          <input
+            className="newapi-input" type="text" value={provider} aria-label={t('providerId')}
+            onChange={(event) => {
+              setProvider(event.target.value)
+              setProviderTouched(true)
+              void refreshCredential(event.target.value)
+            }}
+          />
+          <span className="newapi-hint">{t('providerIdHint')}</span>
+        </label>
+        <label className="newapi-field">
+          <span>{t('providerName')}</span>
+          <input
+            className="newapi-input" type="text" value={displayName} aria-label={t('providerName')}
+            placeholder={t('providerNameHint')}
+            onChange={(event) => { setDisplayName(event.target.value); setDisplayNameTouched(true) }}
+          />
+          <span className="newapi-hint">{displayName.length > 0 ? '' : hostnameOf(baseURL)}</span>
+        </label>
+      </div>
+
+      <div className="newapi-field">
+        <span className="newapi-field-label">{t('protocol')}</span>
+        <nav className="newapi-protocol-nav" aria-label={`${t('protocol')} navigation`}>
+          <button
+            type="button" role="tab" aria-selected={protocol !== 'anthropic-messages'}
+            className={`newapi-protocol-tab${protocol !== 'anthropic-messages' ? ' is-active' : ''}`}
+            onClick={() => { if (protocol === 'anthropic-messages') setProtocol('chat-completions') }}
+          >{t('protocolOpenAI')}</button>
+          <button
+            type="button" role="tab" aria-selected={protocol === 'anthropic-messages'}
+            className={`newapi-protocol-tab${protocol === 'anthropic-messages' ? ' is-active' : ''}`}
+            onClick={() => { setProtocol('anthropic-messages') }}
+          >{t('protocolAnthropic')}</button>
+        </nav>
+        <select
+          id="newapi-protocol" className="newapi-select" value={protocol}
+          aria-label={t('protocol')}
+          onChange={(event) => {
+            const value = event.target.value
+            setProtocol(value === 'responses' || value === 'anthropic-messages' ? value : 'chat-completions')
+          }}
+        >
+          {protocol === 'anthropic-messages'
+            ? <option value="anthropic-messages">{t('protocolAnthropicMessages')}</option>
+            : (
+              <>
+                <option value="chat-completions">{t('protocolChatCompletions')}</option>
+                <option value="responses">{t('protocolResponses')}</option>
+              </>
+            )}
+        </select>
       </div>
 
       <section className="newapi-catalog" aria-label={t('models')}>

@@ -35,9 +35,9 @@ import type {
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { fetch as undiciFetch, ProxyAgent } from 'undici'
-import { serializeRequest } from './serialize.ts'
-import { parseSse } from './sse.ts'
-import { translate } from './translate.ts'
+import { serializeAnthropicRequest, serializeRequest, serializeResponsesRequest } from './serialize.ts'
+import { parseSse, parseSseEvents } from './sse.ts'
+import { translate, translateAnthropic, translateResponses } from './translate.ts'
 import type {
   ModelsDevApi,
   ModelsDevMatch,
@@ -47,6 +47,7 @@ import type {
   ProviderHints,
   WireError,
   WireModelList,
+  NewApiProtocol,
 } from './types.ts'
 
 /** Prefix for adapter-raised diagnostics. */
@@ -93,16 +94,16 @@ export interface NewApiCatalogModel {
  * makes a configuration change reach the next request without re-registration.
  */
 export interface NewApiConnectionOptions {
-  /** Gateway base including the `/v1` prefix; `/chat/completions` and `/models` are appended. */
-  baseURL: string
-  /**
-   * Credential reference of this same resolution, resolved per request.
-   * Travelling with the endpoint is the point: a request can never pair one
-   * generation's URL with another generation's secret. The reference is the
-   * fixed id `newapi` — the web settings page owns the value, and a literal
-   * key is not a configuration value.
-   */
+  /** Stable provider route id for this channel. */
+  provider: string
+  /** Human-facing provider display name. */
+  displayName: string
+  /** Stable credential reference for this channel. */
   apiKeyRef: CredentialRef
+  /** Gateway base including the `/v1` prefix; request and discovery paths are appended. */
+  baseURL: string
+  /** Wire protocol used for model requests. */
+  protocol: NewApiProtocol
   /** Advisory models exposed to discovery consumers; requests remain unrestricted. */
   models: readonly NewApiCatalogModel[]
   /**
@@ -131,8 +132,8 @@ export interface NewApiConnectionOptions {
 
 /** Constructor options for {@link NewApiAdapter}: the operation-local resolution hooks the plugin owns. */
 export interface NewApiAdapterOptions {
-  /** Current validated connection facts; called once per operation. */
-  options: () => NewApiConnectionOptions
+  /** Current validated connection facts; called once per operation and route. */
+  options: (provider?: string) => NewApiConnectionOptions
   /**
    * Resolve the bearer token for the connection facts of one request. The
    * snapshot is passed in — never re-read — so the key can only ever come
@@ -285,9 +286,9 @@ export function matchModelsDev(api: ModelsDevApi, id: string, hints?: ProviderHi
  * @returns the normalized base with no trailing slash.
  */
 export function normalizeBaseUrl(raw: string): string {
-  const base = raw.trim().replace(/\/+$/, '')
+  const base = raw.trim().replace(/\/+$/, '').replace(/\/(?:chat\/completions|responses|messages)$/i, '')
   if (!/^https?:\/\//.test(base)) {
-    throw new Error(`${PKG}: baseURL must be an absolute http(s) URL including the /v1 prefix, e.g. http://gw.local:3000/v1 (got: ${raw.trim()})`)
+    throw new Error(`${PKG}: baseURL must be an absolute http(s) URL including the /v1 prefix (got: ${raw.trim()})`)
   }
   return base
 }
@@ -418,15 +419,16 @@ export class NewApiAdapter extends LlmAdapter {
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
-    return { id: provider, name: 'NewAPI' }
+    const connection = this.config.options(provider)
+    return { id: provider, name: connection.displayName || 'NewAPI' }
   }
 
-  override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
-    return this.config.options().retryPolicy
+  override providerRetryPolicy(provider: string): ResolvedRetryPolicy {
+    return this.config.options(provider).retryPolicy
   }
 
   override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return Promise.resolve(this.config.options().models.map(model => modelInfo(provider, model)))
+    return Promise.resolve(this.config.options(provider).models.map(model => modelInfo(provider, model)))
   }
 
   override resolveModel(
@@ -434,7 +436,7 @@ export class NewApiAdapter extends LlmAdapter {
     model: string,
     _signal?: AbortSignal,
   ): Promise<LlmResolvedModelInfo> {
-    const connection = this.config.options()
+    const connection = this.config.options(provider)
     const configured = connection.models.find(entry => entry.id === model)
     const defaultMaxTokens = configured?.maxTokens ?? connection.maxTokens
     return Promise.resolve({
@@ -482,7 +484,10 @@ export class NewApiAdapter extends LlmAdapter {
    *   with context/maxTokens facts from the configured catalog when ids match.
    */
   async discoverModels(request: LlmModelDiscoveryRequest): Promise<readonly LlmDiscoveredModel[]> {
-    const connection = this.config.options()
+    const connection = this.config.options(request.provider)
+    const protocol: NewApiProtocol = request.api === 'responses' || request.api === 'anthropic-messages'
+      ? request.api
+      : 'chat-completions'
     const base = request.baseURL !== undefined && request.baseURL.length > 0
       ? normalizeBaseUrl(request.baseURL)
       : connection.baseURL
@@ -494,7 +499,9 @@ export class NewApiAdapter extends LlmAdapter {
       response = await fetch(`${base}/models`, {
         method: 'GET',
         headers: {
-          'authorization': `Bearer ${apiKey}`,
+          ...(protocol === 'anthropic-messages'
+            ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+            : { authorization: `Bearer ${apiKey}` }),
           'accept': 'application/json',
           ...attributionHeaders(),
         },
@@ -659,7 +666,7 @@ export class NewApiAdapter extends LlmAdapter {
     // never observes a configuration change and the next call re-resolves.
     // The key resolves *from this snapshot*, so an endpoint and the secret
     // sent to it can never come from different configuration generations.
-    const connection = this.config.options()
+    const connection = this.config.options(options.provider)
     const apiKey = await this.config.resolveApiKey(connection)
     const consumer = new AbortController()
     const upstream = options.signal === undefined
@@ -715,12 +722,18 @@ export class NewApiAdapter extends LlmAdapter {
     apiKey: string,
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
-    const body = serializeRequest(options)
+    const body = connection.protocol === 'responses'
+      ? serializeResponsesRequest(options)
+      : connection.protocol === 'anthropic-messages'
+        ? serializeAnthropicRequest(options)
+        : serializeRequest(options)
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)
     const headers = {
-      'authorization': `Bearer ${apiKey}`,
+      ...(connection.protocol === 'anthropic-messages'
+        ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+        : { authorization: `Bearer ${apiKey}` }),
       'content-type': 'application/json',
       'accept': 'text/event-stream',
       // The mandatory product attribution; nothing per-request or per-user
@@ -730,7 +743,10 @@ export class NewApiAdapter extends LlmAdapter {
 
     let response: Response
     try {
-      response = await fetch(`${connection.baseURL}/chat/completions`, {
+      const endpoint = connection.protocol === 'responses'
+        ? '/responses'
+        : connection.protocol === 'anthropic-messages' ? '/messages' : '/chat/completions'
+      response = await fetch(`${connection.baseURL}${endpoint}`, {
         method: 'POST',
         headers,
         body: payload,
@@ -773,6 +789,12 @@ export class NewApiAdapter extends LlmAdapter {
       throw new LlmError('NewAPI returned no response body', 'EMPTY_RESPONSE')
     }
 
-    yield* translate(parseSse(response.body, onComment))
+    if (connection.protocol === 'responses') {
+      yield* translateResponses(parseSseEvents(response.body, onComment))
+    } else if (connection.protocol === 'anthropic-messages') {
+      yield* translateAnthropic(parseSseEvents(response.body, onComment))
+    } else {
+      yield* translate(parseSse(response.body, onComment))
+    }
   }
 }

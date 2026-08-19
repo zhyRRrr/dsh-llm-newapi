@@ -17,6 +17,31 @@ import { LlmError } from '@deepseek-ai/dsh-llm'
 /** The terminal payload the gateway (and OpenAI) sends after the last chunk. */
 export const DONE = '[DONE]'
 
+export interface SseEvent { event?: string; data: string }
+
+/** Parse Responses API SSE while retaining the event name. */
+export async function* parseSseEvents(
+  stream: ReadableStream<BufferSource>,
+  onComment?: (comment: string) => void,
+): AsyncGenerator<SseEvent> {
+  const events = stream
+    .pipeThrough(new TextDecoderStream())
+    .pipeThrough(new EventSourceParserStream({ onComment }))
+  const reader = events.getReader()
+  try {
+    while (true) {
+      const { done, value: event } = await reader.read()
+      if (done) return
+      yield {
+        ...event.event === undefined ? {} : { event: event.event },
+        data: event.data,
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 /**
  * Parse an SSE byte stream into data payloads. Yields `[DONE]` as the final
  * value and returns; throws `LlmError('STREAM_CLOSED')` when the stream ends
@@ -32,9 +57,16 @@ export async function* parseSse(
   const events = stream
     .pipeThrough(new TextDecoderStream())
     .pipeThrough(new EventSourceParserStream({ onComment }))
-  for await (const { data } of events) {
-    yield data
-    if (data === DONE) return
+  const reader = events.getReader()
+  try {
+    while (true) {
+      const { done, value: event } = await reader.read()
+      if (done) break
+      yield event.data
+      if (event.data === DONE) return
+    }
+  } finally {
+    reader.releaseLock()
   }
   throw new LlmError('SSE stream ended without [DONE]', 'STREAM_CLOSED')
 }

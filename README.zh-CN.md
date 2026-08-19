@@ -6,72 +6,80 @@
 
 - 供应商 route id：`newapi`
 - 显示名称：`NewAPI`
-- 形态：LLM Provider 插件——实现 `@deepseek-ai/dsh-llm` 的 `LlmAdapter` seam；NewAPI 为 OpenAI 兼容网关（`POST {baseURL}/chat/completions`、`GET {baseURL}/models`，baseURL 含 `/v1`）
+- 形态：LLM Provider 插件——实现 `@deepseek-ai/dsh-llm` 的 `LlmAdapter` seam；NewAPI 网关支持 OpenAI（`POST {baseURL}/chat/completions` 或 `POST {baseURL}/responses`）与 Anthropic Messages（`POST {baseURL}/messages`），模型发现统一使用 `GET {baseURL}/models`
 - 双侧结构：宿主侧（adapter + 模型发现）+ 浏览器侧（dsh web 设置面板中的「NewAPI」设置页，含「获取模型」）
 
 设计决策与差异分析见 [DESIGN.md](DESIGN.md)；参考实现 `deepseek-harness/packages/llm/llm-deepseek`。
 
-## 安装（dsh ≥ 0.1.0-rc）
+## 安装（dsh >= 0.1.0-rc）
 
-### 发布通道与版本选择
-
-项目采用**双发布通道**，默认从 **npm registry** 安装（或引用**版本化 tag**），不要跟随 `main` 分支 HEAD：
-
-| 通道 | 版本形态 | 安装引用 | 适用场景 |
-|---|---|---|---|
-| **稳定版（推荐）** | `vX.Y.Z` | `dsh plugin --profile web add dsh-llm-newapi`（npm `latest`）或 `github:wenzetan/dsh-llm-newapi#latest` | 日常使用；已通过全部门禁并经人工确认晋升 |
-| **测试版** | `vX.Y.Z-rc.N` 等 | `dsh plugin --profile web add dsh-llm-newapi@next` 或 `github:wenzetan/dsh-llm-newapi#v0.8.2-rc.3` | 尝鲜/验证新功能；未确认，仅发 GitHub Pre-release 与 npm `next` |
-| **main 分支 HEAD（不推荐）** | 无 tag | `github:wenzetan/dsh-llm-newapi` | 开发预览；未打 tag 的提交未走发布验证，可能是不稳定构建 |
-
-> 💡 npm 的 `latest` dist-tag（以及 GitHub 的 `latest` tag）始终指向**人工确认过**的最新正式版——默认安装命令不会过期，本 README 无需随版本更新。仅在需要复现旧构建时才固定 `#vX.Y.Z`。不带 `#tag` 的 `github:` 简写会安装 `main` 分支 HEAD——那不是发布通道。
-
-### 方式 A：npm registry（默认，推荐）
+### 从本 GitHub 仓库安装
 
 ```sh
-dsh plugin --profile web add dsh-llm-newapi        # 稳定版：npm latest（自动跟随已确认的发布）
-# dsh plugin --profile web add dsh-llm-newapi@next  # 测试版
-
-# 然后：注册 bundle——编辑 $DSH_HOME/profiles/web/package.json
-#       （默认 ~/.dsh/profiles/web/package.json），
-#       在 dsh.profile.bundles 数组加 "dsh-llm-newapi"——重启 dsh web
+dsh plugin --profile web add github:zhyRRrr/dsh-llm-newapi
 ```
 
-### 方式 B：GitHub 简写——`#latest`（移动）或 `#vX.Y.Z`（固定）
+安装后确认 web profile 的 `dsh.profile.bundles` 数组中包含 `dsh-llm-newapi`：
+
+```text
+Windows：%USERPROFILE%\.dsh\profiles\web\package.json
+Linux/macOS：~/.dsh/profiles/web/package.json
+```
+
+然后重启 dsh web。Windows CMD：
+
+```bat
+for /f "tokens=5" %a in ('netstat -ano ^| findstr :3080 ^| findstr LISTENING') do taskkill /F /PID %a
+start "" /b dsh web --host 127.0.0.1 --port 3080
+```
+
+### 本地开发安装
 
 ```sh
-dsh plugin --profile web add "github:wenzetan/dsh-llm-newapi#latest"    # 最新确认的正式版
-# dsh plugin --profile web add "github:wenzetan/dsh-llm-newapi#v0.8.1"  # 精确版本
-# 同方式 A 的注册与重启
+git clone https://github.com/zhyRRrr/dsh-llm-newapi.git
+cd dsh-llm-newapi
+npm install
+npm run build
+npm test
 ```
 
-### 方式 C：Release tarball（免 GitHub 克隆）
+Windows CMD 安装本地目录时使用绝对路径：
 
-```sh
-dsh plugin --profile web add \
-  https://github.com/wenzetan/dsh-llm-newapi/releases/download/v0.8.1/dsh-llm-newapi-0.8.1.tgz
-# 同方式 A 的注册与重启；测试版用对应 -rc.N 的 Release 附件
+```bat
+dsh plugin --profile web add link:E:\EducationApp\dsh-llm-newapi
 ```
 
-### 方式 D：本地开发（link）
-
-```sh
-git clone https://github.com/wenzetan/dsh-llm-newapi && cd dsh-llm-newapi
-npm install && npm run build && npm test
-dsh plugin --profile web add link:$(pwd)
-# 同方式 A 的注册与重启；改码后重跑 npm run build、提交 lib/ 并重启 dsh web
-```
+GitHub 安装会执行已提交的 `lib/index.js` 和 `lib/client.js`。修改源码后推送前必须重新运行 `npm run build`。
 
 > **安装时的 missing peer 警告是预期行为，可忽略**：`react`/`cordis`/`dsh-llm`/`dsh-settings`/`schemastery` 等运行时由 dsh 宿主 app 提供，插件声明为 `peerDependencies` 正是要求"不要装自己的副本"；profile 的 `autoInstallPeers: false` 让 pnpm 静态报 missing。所有 dsh 插件安装时都会出现这行 WARN（dsh-at-file 等同款），安装成功不受影响。切勿手动安装该列表或开启 autoInstallPeers——会导致 cordis 服务双实例、插件静默失效。
 
-装好后：设置面板出现「NewAPI」页 → 填 API key 与网关地址（含 `/v1`）→「获取模型」拉取并勾选 chat 模型（embedding / rerank / ranker 自动过滤）→ 保存。模型选择器（composer）即出现 `newapi` 路由的模型。
+## 网页配置与使用
 
-## 配置（cordis.yml entry config；装机后 settings.yaml `llm-newapi:` 段热更新覆盖）
+重启后进入 dsh 设置，打开 **NewAPI** 页面：
+
+1. 在顶部「渠道」下拉框选择已保存渠道，或点击「添加渠道」。
+2. 输入该渠道的 API 密钥，粘贴网关地址；通常网关地址以 `/v1` 结尾。
+3. 粘贴 URL 后会自动填充 Provider ID 与显示名称。两个字段都可修改；Provider ID 只能使用小写 `a-z`、`0-9` 和 `-`，并且必须唯一。
+4. 在大导航中选择 **OpenAI 协议** 或 **Anthropic 协议**。
+5. OpenAI 下选择 **Chat Completions** 或 **Responses**；Anthropic 下选择 **Messages**。
+6. 点击「获取模型」，选择需要的模型，最后点击「保存」。
+
+所有已保存渠道会同时注册；每个渠道分别拥有模型列表、协议、网关地址、provider 路由和 API 密钥。
+
+## YAML 配置
 
 ```yaml
 - id: llm-newapi
   name: dsh-llm-newapi
   config:
     baseURL: http://gw.local:3000/v1   # 含 /v1 前缀；缺省回退 env NEWAPI_BASE_URL → 占位符
+    protocol: responses                 # 旧单渠道写法；下面的 channels 支持同时配置多个网关
+    # channels:                        # 每个渠道注册独立 provider 路由和凭据
+    #   - provider: x-ailzd-com         # 可选；默认由网关域名生成
+    #     displayName: x.ailzd.com      # 可选；默认使用网关域名
+    #     baseURL: https://x.ailzd.com/v1
+    #     protocol: responses           # chat-completions、responses 或 anthropic-messages
+    #   - baseURL: https://api.example.com/v1  # provider 自动为 api-example-com
     # models:                          # 建议性目录；默认空，用「获取模型」拉取 /models
     #   - id: deepseek-chat
     #     contextWindow: 65536
@@ -87,9 +95,15 @@ dsh plugin --profile web add link:$(pwd)
     #     tencent/Hunyuan-MT-7B: nano-gpt
 ```
 
-**API 密钥**：不是配置项——固定存于 credentials store 的 `newapi` 引用下，唯一配置面是 web 设置页（写后立即生效，每请求解析）。插件不从任何环境变量读 key：credentials 服务的顶层只读层就是继承环境，`NEWAPI_API_KEY` 式引用会被环境里同名变量遮蔽并锁死前端输入框，故引用名固定为 `newapi`。无密钥时首个请求以 `MISSING_CREDENTIAL` 失败并指向设置页，不在装载时报错。
+**API 密钥**：旧单渠道使用 credentials 的 `newapi` 引用；新增渠道使用 `newapi_<provider>`，例如 provider 为 `api-example-com` 时引用为 `newapi_api_example_com`。在 Web 页面按渠道填写密钥；每次请求按渠道解析，插件不会打印或回显密钥。
 
-**模型发现**：`GET {baseURL}/models`，只采纳可服务 chat-completions 的模型——embedding / rerank / ranker 家族按命名约定过滤（可配）。
+**生成协议**：`protocol: chat-completions` 是兼容旧配置的默认值，发送 `POST {baseURL}/chat/completions` 并使用 Bearer 鉴权。`protocol: responses` 发送 `POST {baseURL}/responses`。`protocol: anthropic-messages` 发送 `POST {baseURL}/messages`，使用 `x-api-key` 与 `anthropic-version: 2023-06-01`，工具调用映射为 Anthropic 的 `tool_use`/`tool_result`。`baseURL` 保持网关根地址（通常以 `/v1` 结尾）；误填的 `/chat/completions`、`/responses` 或 `/messages` 后缀会被自动去除。
+
+**模型发现**：三种生成协议都通过 `GET {baseURL}/models` 获取模型。网关列表没有可靠的能力字段，embedding / rerank / ranker 家族按命名约定过滤（可配）。
+
+**多渠道**：配置 `channels` 可同时注册多个网关。每个渠道拥有独立 provider 路由、模型目录、协议和凭据引用（旧 `newapi` 路由使用 `newapi`，其他渠道使用 `newapi_<provider>`）。Web 设置页顶部下拉框用于切换渠道；粘贴网关地址后会自动用域名填充 Provider ID 与显示名称，用户修改过的字段不会被覆盖。
+
+**仓库与发布**：本仓库为 [zhyRRrr/dsh-llm-newapi](https://github.com/zhyRRrr/dsh-llm-newapi)。推送前运行 `npm run typecheck`、`npm run build` 和 `npm test`，提交生成的 `lib/`；不要提交本机 `verification` 备份或机器相关的 settings 文件。
 
 **Web 设置页**：浏览器侧经 `dsh.client` manifest 被 dsh web 运行时动态发现（`ClientModuleRegistry` 扫描组合插件行），向 `settings.section` 多贡献 slot 注册（dsh 契约：功能自有设置页，加设置不改 shell）。注意这是设置面板中独立的「NewAPI」页，不嵌在官方 Models 页内部。输入框与按钮全部走 `--dsw-alias-*` 设计令牌（与官方 Models 页同配方），亮色 / 暗色主题自动适配。
 

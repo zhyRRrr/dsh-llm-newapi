@@ -12,6 +12,12 @@
  */
 /** The terminal payload the gateway (and OpenAI) sends after the last chunk. */
 export declare const DONE = "[DONE]";
+export interface SseEvent {
+    event?: string;
+    data: string;
+}
+/** Parse Responses API SSE while retaining the event name. */
+export declare function parseSseEvents(stream: ReadableStream<BufferSource>, onComment?: (comment: string) => void): AsyncGenerator<SseEvent>;
 /**
  * Parse an SSE byte stream into data payloads. Yields `[DONE]` as the final
  * value and returns; throws `LlmError('STREAM_CLOSED')` when the stream ends

@@ -9,6 +9,7 @@
  */
 import type { FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm';
 import type { WireUsage } from './types.js';
+import type { SseEvent } from './sse.js';
 /**
  * Map the wire finish_reason vocabulary to the harness FinishReason.
  * @param reason - the wire `finish_reason` string.
@@ -32,3 +33,7 @@ export declare function mapUsage(usage: WireUsage): TokenUsage;
  *   `EMPTY_RESPONSE` error finish instead of a successful empty message.
  */
 export declare function translate(payloads: AsyncIterable<string>): AsyncGenerator<StreamChunk>;
+/** Translate OpenAI Responses API named SSE events into DSH stream chunks. */
+export declare function translateResponses(events: AsyncIterable<SseEvent>): AsyncGenerator<StreamChunk>;
+/** Translate Anthropic Messages SSE events into DSH stream chunks. */
+export declare function translateAnthropic(events: AsyncIterable<SseEvent>): AsyncGenerator<StreamChunk>;

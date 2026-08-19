@@ -13,7 +13,7 @@
 
 import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import type { WireMessage, WireRequest, WireTool } from './types.ts'
+import type { AnthropicContent, AnthropicMessage, AnthropicRequest, AnthropicTool, ResponsesInputItem, ResponsesRequest, ResponsesTool, WireMessage, WireRequest, WireTool } from './types.ts'
 
 /** Join the text blocks of a message (used for user/tool-result content). */
 function flattenText(blocks: ContentBlock[]): string {
@@ -137,5 +137,93 @@ export function serializeRequest(options: GenerateOptions): WireRequest {
     ...options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens },
     ...options.reasoningEffort !== undefined ? { reasoning_effort: options.reasoningEffort } : {},
     ...options.stop !== undefined ? { stop: options.stop } : {},
+  }
+}
+
+/** Serialize the same harness conversation for the OpenAI Responses API. */
+export function serializeResponsesRequest(options: GenerateOptions): ResponsesRequest {
+  const input: ResponsesInputItem[] = []
+  for (const message of options.messages) {
+    assertTextOnly(message.content)
+    const text = flattenText(message.content)
+    const reasoning = message.content.filter(block => block.type === 'reasoning').map(block => block.text).join('')
+    const calls = message.content.filter(block => block.type === 'tool-call')
+    const results = message.content.filter(block => block.type === 'tool-result')
+    if (message.role === 'assistant') {
+      if (text.length > 0 || calls.length === 0) input.push({ type: 'message', role: 'assistant', content: text })
+      for (const call of calls) input.push({ type: 'function_call', call_id: call.id, name: call.name, arguments: call.arguments })
+      continue
+    }
+    if (message.role === 'system') {
+      input.push({ type: 'message', role: 'system', content: text })
+      continue
+    }
+    if (text.length > 0 || results.length === 0) input.push({ type: 'message', role: 'user', content: text })
+    for (const result of results) input.push({ type: 'function_call_output', call_id: result.toolCallId, output: flattenText(result.content) || '(no output)' })
+  }
+  const tools: ResponsesTool[] | undefined = options.tools?.map(tool => ({
+    type: 'function', name: tool.name, description: tool.description, parameters: tool.parameters,
+  }))
+  return {
+    model: options.model,
+    input,
+    stream: true,
+    ...tools !== undefined && tools.length > 0 ? { tools } : {},
+    ...options.system === undefined ? {} : { instructions: options.system },
+    ...options.temperature === undefined ? {} : { temperature: options.temperature },
+    ...options.maxTokens === undefined ? {} : { max_output_tokens: options.maxTokens },
+    ...options.reasoningEffort === undefined ? {} : { reasoning: { effort: options.reasoningEffort } },
+    ...options.stop === undefined ? {} : { stop: options.stop },
+  }
+}
+
+function parseToolArguments(argumentsText: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(argumentsText)
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+/** Serialize the harness conversation for Anthropic Messages. */
+export function serializeAnthropicRequest(options: GenerateOptions): AnthropicRequest {
+  const messages: AnthropicMessage[] = []
+  const systemParts: string[] = options.system === undefined ? [] : [options.system]
+  for (const message of options.messages) {
+    assertTextOnly(message.content)
+    const text = flattenText(message.content)
+    if (message.role === 'system') {
+      if (text.length > 0) systemParts.push(text)
+      continue
+    }
+    const blocks: AnthropicContent[] = []
+    if (text.length > 0) blocks.push({ type: 'text', text })
+    for (const block of message.content) {
+      if (block.type === 'tool-call') {
+        blocks.push({ type: 'tool_use', id: block.id, name: block.name, input: parseToolArguments(block.arguments) })
+      } else if (block.type === 'tool-result') {
+        blocks.push({ type: 'tool_result', tool_use_id: block.toolCallId, content: flattenText(block.content) || '(no output)' })
+      }
+    }
+    if (blocks.length === 0) blocks.push({ type: 'text', text: '' })
+    messages.push({ role: message.role === 'assistant' ? 'assistant' : 'user', content: blocks })
+  }
+  const tools: AnthropicTool[] | undefined = options.tools?.map(tool => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.parameters,
+  }))
+  return {
+    model: options.model,
+    max_tokens: options.maxTokens ?? 8192,
+    messages,
+    stream: true,
+    ...systemParts.length === 0 ? {} : { system: systemParts.join('\n\n') },
+    ...tools !== undefined && tools.length > 0 ? { tools } : {},
+    ...options.temperature === undefined ? {} : { temperature: options.temperature },
+    ...options.stop === undefined ? {} : { stop_sequences: options.stop },
   }
 }

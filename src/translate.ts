@@ -12,6 +12,7 @@ import { CallId, EMPTY_RESPONSE_CODE, LlmError } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, FinishReason, StreamChunk, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { DONE } from './sse.ts'
 import type { WireChunk, WireUsage } from './types.ts'
+import type { SseEvent } from './sse.ts'
 
 /** One open block under assembly. */
 interface OpenBlock {
@@ -185,4 +186,197 @@ export async function* translate(payloads: AsyncIterable<string>): AsyncGenerato
   // parseSse guarantees the [DONE] sentinel (or throws); reaching here means
   // the payload source violated that contract.
   throw new LlmError('SSE payload stream ended without [DONE]', 'STREAM_CLOSED')
+}
+
+/** Translate OpenAI Responses API named SSE events into DSH stream chunks. */
+export async function* translateResponses(events: AsyncIterable<SseEvent>): AsyncGenerator<StreamChunk> {
+  let nextIndex = 0
+  let text: OpenBlock | undefined
+  let reasoning: OpenBlock | undefined
+  const calls = new Map<string, OpenBlock>()
+  const order: OpenBlock[] = []
+  let usage: TokenUsage | undefined
+  let finish: FinishReason | undefined
+  const open = (kind: OpenBlock['kind']): OpenBlock => {
+    const block: OpenBlock = { index: nextIndex++, kind, text: '' }
+    order.push(block)
+    return block
+  }
+  const ensureCall = (itemId: string, callId?: string, name?: string): { block: OpenBlock; created: boolean } => {
+    let block = calls.get(itemId)
+    let created = false
+    if (block === undefined) {
+      block = open('tool-call')
+      block.callId = callId ?? itemId
+      if (name !== undefined && name.length > 0) block.name = name
+      calls.set(itemId, block)
+      created = true
+    } else {
+      if (callId !== undefined && callId.length > 0) block.callId = callId
+      if (name !== undefined && name.length > 0) block.name = name
+    }
+    return { block, created }
+  }
+  const close = (): StreamChunk[] => order.map(block => ({ type: 'block-end', index: block.index, block: closeBlock(block) }))
+  for await (const frame of events) {
+    let data: any
+    try { data = JSON.parse(frame.data) } catch { throw new LlmError(`malformed Responses SSE payload: ${frame.data.slice(0, 120)}`, 'MALFORMED_RESPONSE') }
+    const event = frame.event ?? data.type
+    if (event === 'response.output_text.delta') {
+      const delta = typeof data.delta === 'string' ? data.delta : ''
+      if (delta.length > 0) {
+        if (text === undefined) { text = open('text'); yield { type: 'block-start', index: text.index, blockType: 'text' } }
+        text.text += delta; yield { type: 'text-delta', index: text.index, text: delta }
+      }
+    } else if (event === 'response.reasoning_summary_text.delta' || event === 'response.reasoning_text.delta') {
+      const delta = typeof data.delta === 'string' ? data.delta : ''
+      if (delta.length > 0) {
+        if (reasoning === undefined) { reasoning = open('reasoning'); yield { type: 'block-start', index: reasoning.index, blockType: 'reasoning' } }
+        reasoning.text += delta; yield { type: 'reasoning-delta', index: reasoning.index, text: delta }
+      }
+    } else if (event === 'response.output_item.added' || event === 'response.output_item.done') {
+      const item = data.item
+      if (item?.type === 'function_call') {
+        const itemId = String(item.id ?? item.item_id ?? item.call_id ?? '')
+        const callId = typeof item.call_id === 'string' && item.call_id.length > 0 ? item.call_id : undefined
+        if (itemId.length > 0) {
+          const { block, created } = ensureCall(itemId, callId, typeof item.name === 'string' ? item.name : undefined)
+          if (created) yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
+          if (event === 'response.output_item.done' && typeof item.arguments === 'string' && block.text.length === 0) block.text = item.arguments
+        }
+      }
+    } else if (event === 'response.function_call_arguments.delta') {
+      const itemId = String(data.item_id ?? data.call_id ?? '')
+      const callId = typeof data.call_id === 'string' && data.call_id.length > 0 ? data.call_id : undefined
+      if (itemId.length > 0) {
+        const { block, created } = ensureCall(itemId, callId)
+        if (created) yield { type: 'block-start', index: block.index, blockType: 'tool-call' }
+        const delta = typeof data.delta === 'string' ? data.delta : ''
+        block.text += delta
+        yield { type: 'tool-call-delta', index: block.index, id: CallId(block.callId ?? itemId), ...block.name === undefined ? {} : { name: block.name }, argumentsDelta: delta }
+      }
+    } else if (event === 'response.completed' || event === 'response.incomplete' || event === 'response.failed') {
+      const response = data.response ?? data
+      const wireUsage = response.usage
+      if (wireUsage !== undefined) usage = mapResponsesUsage(wireUsage)
+      if (event === 'response.failed' || response.status === 'failed') {
+        finish = { kind: 'error', failure: { message: response.error?.message ?? 'Responses API request failed', code: String(response.error?.code ?? 'RESPONSE_FAILED').toUpperCase() } }
+      } else if (event === 'response.incomplete' || response.status === 'incomplete') {
+        finish = { kind: 'max-tokens' }
+      } else {
+        finish = { kind: calls.size > 0 ? 'tool-calls' : 'stop' }
+      }
+    }
+    if (usage === undefined && data.response?.usage !== undefined) usage = mapResponsesUsage(data.response.usage)
+  }
+  for (const chunk of close()) yield chunk
+  if (usage !== undefined) yield { type: 'usage', usage }
+  yield { type: 'finish', reason: finish ?? (order.length === 0 ? { kind: 'error', failure: { message: 'model returned an empty Responses result', code: EMPTY_RESPONSE_CODE } } : { kind: 'stop' }) }
+}
+
+/** Translate Anthropic Messages SSE events into DSH stream chunks. */
+export async function* translateAnthropic(events: AsyncIterable<SseEvent>): AsyncGenerator<StreamChunk> {
+  const blocks = new Map<number, OpenBlock>()
+  let usage: TokenUsage | undefined
+  let finish: FinishReason | undefined
+  for await (const frame of events) {
+    let data: any
+    try { data = JSON.parse(frame.data) } catch {
+      throw new LlmError(`malformed Anthropic SSE payload: ${frame.data.slice(0, 120)}`, 'MALFORMED_RESPONSE')
+    }
+    const event = frame.event ?? data.type
+    if (event === 'message_start') {
+      if (data.message?.usage !== undefined) usage = mapAnthropicUsage(data.message.usage)
+    } else if (event === 'content_block_start') {
+      const index = Number(data.index)
+      const item = data.content_block
+      if (!Number.isInteger(index) || item === undefined) continue
+      if (item.type === 'text') {
+        const block: OpenBlock = { index, kind: 'text', text: '' }
+        blocks.set(index, block)
+        yield { type: 'block-start', index, blockType: 'text' }
+      } else if (item.type === 'tool_use') {
+        const block: OpenBlock = {
+          index,
+          kind: 'tool-call',
+          text: '',
+          callId: typeof item.id === 'string' ? item.id : '',
+          name: typeof item.name === 'string' ? item.name : '',
+        }
+        blocks.set(index, block)
+        yield { type: 'block-start', index, blockType: 'tool-call' }
+      } else if (item.type === 'thinking') {
+        const block: OpenBlock = { index, kind: 'reasoning', text: '' }
+        blocks.set(index, block)
+        yield { type: 'block-start', index, blockType: 'reasoning' }
+      }
+    } else if (event === 'content_block_delta') {
+      const index = Number(data.index)
+      const block = blocks.get(index)
+      if (block === undefined) continue
+      const delta = data.delta
+      if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+        block.text += delta.text
+        yield { type: 'text-delta', index, text: delta.text }
+      } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string') {
+        block.text += delta.thinking
+        yield { type: 'reasoning-delta', index, text: delta.thinking }
+      } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
+        block.text += delta.partial_json
+        yield {
+          type: 'tool-call-delta',
+          index,
+          id: CallId(block.callId ?? ''),
+          ...block.name === undefined ? {} : { name: block.name },
+          argumentsDelta: delta.partial_json,
+        }
+      }
+    } else if (event === 'content_block_stop') {
+      const index = Number(data.index)
+      const block = blocks.get(index)
+      if (block !== undefined) yield { type: 'block-end', index, block: closeBlock(block) }
+    } else if (event === 'message_delta') {
+      if (data.usage !== undefined) usage = mapAnthropicUsage(data.usage, usage)
+      const reason = data.delta?.stop_reason
+      if (typeof reason === 'string') finish = mapAnthropicFinishReason(reason)
+    } else if (event === 'message_stop') {
+      // The terminal message_delta carries the finish reason; message_stop is
+      // only the transport delimiter.
+    } else if (event === 'error') {
+      finish = { kind: 'error', failure: { message: data.error?.message ?? 'Anthropic API request failed', code: String(data.error?.type ?? 'ANTHROPIC_ERROR').toUpperCase() } }
+    }
+  }
+  if (usage !== undefined) yield { type: 'usage', usage }
+  yield {
+    type: 'finish',
+    reason: finish ?? (blocks.size === 0
+      ? { kind: 'error', failure: { message: 'model returned an empty Anthropic result', code: EMPTY_RESPONSE_CODE } }
+      : { kind: 'stop' }),
+  }
+}
+
+function mapAnthropicFinishReason(reason: string): FinishReason {
+  switch (reason) {
+    case 'end_turn':
+    case 'stop_sequence': return { kind: 'stop' }
+    case 'tool_use': return { kind: 'tool-calls' }
+    case 'max_tokens': return { kind: 'max-tokens' }
+    default: return { kind: 'error', failure: { message: `model stopped: ${reason}`, code: reason.toUpperCase() } }
+  }
+}
+
+function mapAnthropicUsage(value: any, previous?: TokenUsage): TokenUsage {
+  return {
+    inputTokens: Number(value?.input_tokens ?? previous?.inputTokens ?? 0),
+    outputTokens: Number(value?.output_tokens ?? previous?.outputTokens ?? 0),
+    ...value?.cache_read_input_tokens === undefined ? {} : { cacheReadTokens: Number(value.cache_read_input_tokens) },
+  }
+}
+
+function mapResponsesUsage(value: any): TokenUsage {
+  const input = Number(value?.input_tokens ?? value?.prompt_tokens ?? 0)
+  const output = Number(value?.output_tokens ?? value?.completion_tokens ?? 0)
+  const cached = value?.input_tokens_details?.cached_tokens ?? value?.prompt_tokens_details?.cached_tokens
+  const reasoning = value?.output_tokens_details?.reasoning_tokens ?? value?.completion_tokens_details?.reasoning_tokens
+  return { inputTokens: input - (typeof cached === 'number' ? cached : 0), outputTokens: output, ...typeof cached === 'number' ? { cacheReadTokens: cached } : {}, ...typeof reasoning === 'number' ? { reasoningTokens: reasoning } : {} }
 }

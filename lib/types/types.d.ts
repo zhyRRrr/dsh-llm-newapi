@@ -23,6 +23,79 @@ export interface WireRequest {
      */
     stop?: string[];
 }
+/** Wire protocol selected for one gateway. */
+export type NewApiProtocol = 'chat-completions' | 'responses' | 'anthropic-messages';
+/** Responses API request body. */
+export interface ResponsesRequest {
+    model: string;
+    input: ResponsesInputItem[];
+    stream: true;
+    tools?: ResponsesTool[];
+    temperature?: number;
+    max_output_tokens?: number;
+    reasoning?: {
+        effort: string;
+    };
+    stop?: string[];
+    instructions?: string;
+}
+export type ResponsesInputItem = {
+    type: 'message';
+    role: 'user' | 'assistant' | 'system';
+    content: string | ResponsesContent[];
+} | {
+    type: 'function_call';
+    call_id: string;
+    name: string;
+    arguments: string;
+} | {
+    type: 'function_call_output';
+    call_id: string;
+    output: string;
+};
+export interface ResponsesContent {
+    type: 'input_text' | 'output_text';
+    text: string;
+}
+export interface ResponsesTool {
+    type: 'function';
+    name: string;
+    description: string;
+    parameters: Record<string, unknown>;
+}
+/** Request body for the Anthropic Messages API. */
+export interface AnthropicRequest {
+    model: string;
+    max_tokens: number;
+    messages: AnthropicMessage[];
+    stream: true;
+    system?: string;
+    tools?: AnthropicTool[];
+    temperature?: number;
+    stop_sequences?: string[];
+}
+export type AnthropicMessage = {
+    role: 'user' | 'assistant';
+    content: string | AnthropicContent[];
+};
+export type AnthropicContent = {
+    type: 'text';
+    text: string;
+} | {
+    type: 'tool_use';
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+} | {
+    type: 'tool_result';
+    tool_use_id: string;
+    content: string;
+};
+export interface AnthropicTool {
+    name: string;
+    description: string;
+    input_schema: Record<string, unknown>;
+}
 /** System-role message: a single string of instructions. */
 export interface WireSystemMessage {
     role: 'system';

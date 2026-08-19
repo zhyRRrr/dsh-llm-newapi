@@ -12,7 +12,7 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, LlmDiscoveredModel, LlmModelDiscoveryRequest, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials';
-import type { ModelsDevApi, ModelsDevMatch, ModelsDevParamsRequest, ModelsDevParamsResponse, ProviderHints, WireError } from './types.js';
+import type { ModelsDevApi, ModelsDevMatch, ModelsDevParamsRequest, ModelsDevParamsResponse, ProviderHints, WireError, NewApiProtocol } from './types.js';
 /** Prefix for adapter-raised diagnostics. */
 export declare const PKG = "llm-newapi";
 /**
@@ -54,16 +54,16 @@ export interface NewApiCatalogModel {
  * makes a configuration change reach the next request without re-registration.
  */
 export interface NewApiConnectionOptions {
-    /** Gateway base including the `/v1` prefix; `/chat/completions` and `/models` are appended. */
-    baseURL: string;
-    /**
-     * Credential reference of this same resolution, resolved per request.
-     * Travelling with the endpoint is the point: a request can never pair one
-     * generation's URL with another generation's secret. The reference is the
-     * fixed id `newapi` — the web settings page owns the value, and a literal
-     * key is not a configuration value.
-     */
+    /** Stable provider route id for this channel. */
+    provider: string;
+    /** Human-facing provider display name. */
+    displayName: string;
+    /** Stable credential reference for this channel. */
     apiKeyRef: CredentialRef;
+    /** Gateway base including the `/v1` prefix; request and discovery paths are appended. */
+    baseURL: string;
+    /** Wire protocol used for model requests. */
+    protocol: NewApiProtocol;
     /** Advisory models exposed to discovery consumers; requests remain unrestricted. */
     models: readonly NewApiCatalogModel[];
     /**
@@ -91,8 +91,8 @@ export interface NewApiConnectionOptions {
 }
 /** Constructor options for {@link NewApiAdapter}: the operation-local resolution hooks the plugin owns. */
 export interface NewApiAdapterOptions {
-    /** Current validated connection facts; called once per operation. */
-    options: () => NewApiConnectionOptions;
+    /** Current validated connection facts; called once per operation and route. */
+    options: (provider?: string) => NewApiConnectionOptions;
     /**
      * Resolve the bearer token for the connection facts of one request. The
      * snapshot is passed in — never re-read — so the key can only ever come
@@ -184,7 +184,7 @@ export declare class NewApiAdapter extends LlmAdapter {
     private readonly config;
     constructor(config: NewApiAdapterOptions);
     providerInfo(provider: string): LlmProviderInfo;
-    providerRetryPolicy(_provider: string): ResolvedRetryPolicy;
+    providerRetryPolicy(provider: string): ResolvedRetryPolicy;
     listModels(provider: string): Promise<readonly LlmModelInfo[]>;
     resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;
     /**
