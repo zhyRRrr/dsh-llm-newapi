@@ -8,6 +8,7 @@
  * `/plugins/<id>/client.js` serving and the browser module loader.
  */
 import { build } from 'esbuild'
+import { readFile, writeFile } from 'node:fs/promises'
 
 const ID = 'dsh-llm-newapi'
 
@@ -52,3 +53,11 @@ await build({
 })
 
 console.log(`${ID}: wrote lib/client.js`)
+
+// Keep committed maps reproducible when Windows source files use CRLF but CI
+// checks them out with LF line endings.
+const map = JSON.parse(await readFile('lib/client.js.map', 'utf8'))
+if (Array.isArray(map.sourcesContent)) {
+  map.sourcesContent = map.sourcesContent.map(source => source.replace(/\r\n?/g, '\n'))
+}
+await writeFile('lib/client.js.map', JSON.stringify(map))

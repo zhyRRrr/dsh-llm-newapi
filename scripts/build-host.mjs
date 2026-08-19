@@ -21,6 +21,19 @@ await build({
 
 console.log('dsh-llm-newapi: wrote lib/index.js')
 
+// esbuild puts the source text in the external map. GitHub builds on Linux
+// while contributors can build on Windows, so normalize the embedded text to
+// LF and keep the committed artifact byte-for-byte reproducible across both.
+async function normalizeSourceMap(mapFile) {
+  const map = JSON.parse(await readFile(mapFile, 'utf8'))
+  if (Array.isArray(map.sourcesContent)) {
+    map.sourcesContent = map.sourcesContent.map(source => source.replace(/\r\n?/g, '\n'))
+  }
+  await writeFile(mapFile, JSON.stringify(map))
+}
+
+await normalizeSourceMap('lib/index.js.map')
+
 // The sources import siblings with explicit `.ts` extensions
 // (allowImportingTsExtensions), and rewriteRelativeImportExtensions does not
 // apply to declaration-only emit — the .d.ts files would keep pointing at
