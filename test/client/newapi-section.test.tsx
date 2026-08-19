@@ -350,6 +350,19 @@ describe('model catalog', () => {
     expect(savedModels(api)[0].contextWindow).toBe(256_000)
   })
 
+  it('persists the vision capability enabled in a model advanced panel', async () => {
+    const api = wireFace()
+    render(<NewApiSection api={api as never} t={t} />)
+
+    await waitFor(() => { expect(screen.getByLabelText(t('baseUrl'))).toBeTruthy() })
+    fireEvent.click(screen.getByLabelText(`${t('modelAdvanced')} 1`))
+    fireEvent.click(screen.getByLabelText(`${t('modelVision')} 1`))
+    fireEvent.click(screen.getByText(t('apply')))
+
+    await waitFor(() => { expect(api.settings.mutate).toHaveBeenCalledTimes(1) })
+    expect(savedModels(api)[0].input).toEqual(['text', 'image'])
+  })
+
   it('drops an emptied name instead of storing an empty string', async () => {
     const api = wireFace()
     render(<NewApiSection api={api as never} t={t} />)

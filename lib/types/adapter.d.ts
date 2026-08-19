@@ -12,6 +12,7 @@
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, LlmDiscoveredModel, LlmModelDiscoveryRequest, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials';
+import type { ImageAttachmentRef, StoredImageAttachment } from '@deepseek-ai/dsh-attachment';
 import type { ModelsDevApi, ModelsDevMatch, ModelsDevParamsRequest, ModelsDevParamsResponse, ProviderHints, WireError, NewApiProtocol } from './types.js';
 /** Prefix for adapter-raised diagnostics. */
 export declare const PKG = "llm-newapi";
@@ -46,6 +47,8 @@ export interface NewApiCatalogModel {
      * {@link reasoningEfforts}. Absence defaults to the highest declared rung.
      */
     defaultReasoningEffort?: string;
+    /** Accepted input modalities. Omission retains text-only compatibility. */
+    input?: Array<'text' | 'image'>;
 }
 /**
  * Validated connection facts for one operation. The plugin's
@@ -100,6 +103,8 @@ export interface NewApiAdapterOptions {
      * `MISSING_CREDENTIAL` when the credentials store holds no value.
      */
     resolveApiKey: (connection: NewApiConnectionOptions) => Promise<string>;
+    /** Read durable attachment bytes when a vision-enabled model receives an image. */
+    readImage?: (ref: ImageAttachmentRef, signal?: AbortSignal) => Promise<StoredImageAttachment>;
     /**
      * Name the provider route that officially serves a model id, so a
      * multi-provider catalog match can put the vendor's own facts first.

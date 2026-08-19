@@ -312,7 +312,7 @@ function stubModelsListing() {
   await ctx.plugin(LlmRuntime)
   const fiber = await mountPlugin(ctx, {
     channels: [
-      { provider: 'first-gateway', displayName: 'First Gateway', baseURL: 'http://first.example/v1', protocol: 'chat-completions', models: [{ id: 'first-model' }] },
+      { provider: 'first-gateway', displayName: 'First Gateway', baseURL: 'http://first.example/v1', protocol: 'chat-completions', models: [{ id: 'first-model', input: ['text', 'image'] }] },
       { provider: 'second-gateway', displayName: 'Second Gateway', baseURL: 'http://second.example/v1', protocol: 'anthropic-messages', models: [{ id: 'second-model' }] },
     ],
   })
@@ -322,6 +322,7 @@ function stubModelsListing() {
   ])
   assert.deepEqual(ctx.llm.listConfigurableProviders().map(provider => provider.provider), ['first-gateway', 'second-gateway'])
   assert.deepEqual((await ctx.llm.listModels('first-gateway')).map(model => model.id), ['first-model'])
+  assert.deepEqual((await ctx.llm.listModels('first-gateway'))[0].inputModalities, ['text', 'image'])
   assert.deepEqual((await ctx.llm.listModels('second-gateway')).map(model => model.id), ['second-model'])
   await fiber.dispose()
 }

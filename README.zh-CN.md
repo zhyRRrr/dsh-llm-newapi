@@ -83,6 +83,7 @@ GitHub 安装会执行已提交的 `lib/index.js` 和 `lib/client.js`。修改�
     # models:                          # 建议性目录；默认空，用「获取模型」拉取 /models
     #   - id: deepseek-chat
     #     contextWindow: 65536
+    #     input: [text, image]           # 可选；显式声明该模型支持图片
     # modelExcludePatterns:            # 发现时的 chat-only 过滤（整体替换默认）
     #   - embed                        #   默认 ['embed','rerank','ranker']（大小写不敏感 id 子串）
     #   - rerank                       #   置 [] 关闭过滤；多能力 id（bge-m3）需自行补充
@@ -100,6 +101,8 @@ GitHub 安装会执行已提交的 `lib/index.js` 和 `lib/client.js`。修改�
 **生成协议**：`protocol: chat-completions` 是兼容旧配置的默认值，发送 `POST {baseURL}/chat/completions` 并使用 Bearer 鉴权。`protocol: responses` 发送 `POST {baseURL}/responses`。`protocol: anthropic-messages` 发送 `POST {baseURL}/messages`，使用 `x-api-key` 与 `anthropic-version: 2023-06-01`，工具调用映射为 Anthropic 的 `tool_use`/`tool_result`。`baseURL` 保持网关根地址（通常以 `/v1` 结尾）；误填的 `/chat/completions`、`/responses` 或 `/messages` 后缀会被自动去除。
 
 **模型发现**：三种生成协议都通过 `GET {baseURL}/models` 获取模型。网关列表没有可靠的能力字段，embedding / rerank / ranker 家族按命名约定过滤（可配）。
+
+**视觉模型**：上游模型支持图片时，在模型目录中加入 `input: [text, image]`。插件会读取 dsh 持久附件，并按协议发送：Chat Completions 使用 data URL，Responses 使用 `input_image`，Anthropic Messages 使用 base64 `image` source block。未声明 `image` 的模型仍保持纯文本能力；该声明也会让 `dsh-sight` 保留原始图片附件，不再把它替换成 Windows 本地路径。
 
 **多渠道**：配置 `channels` 可同时注册多个网关。每个渠道拥有独立 provider 路由、模型目录、协议和凭据引用（旧 `newapi` 路由使用 `newapi`，其他渠道使用 `newapi_<provider>`）。Web 设置页顶部下拉框用于切换渠道；粘贴网关地址后会自动用域名填充 Provider ID 与显示名称，用户修改过的字段不会被覆盖。
 

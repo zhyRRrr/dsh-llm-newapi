@@ -17,6 +17,7 @@ import z from '@deepseek-ai/schemastery'
 import { assertUsableApiKey, LlmError, resolveRetryPolicy, RetryPolicySchema } from '@deepseek-ai/dsh-llm'
 import type { LlmConfigurableProvider, RetryPolicyConfig } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import type {} from '@deepseek-ai/dsh-attachment'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { deepEqualJson, installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -28,7 +29,7 @@ import {
   normalizeBaseUrl,
   PKG,
 } from './adapter.ts'
-import type { NewApiCatalogModel, NewApiConnectionOptions } from './adapter.ts'
+import type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.ts'
 import type { ModelsDevParamsRequest, NewApiProtocol, ProviderHints } from './types.ts'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 
@@ -43,7 +44,14 @@ export {
   normalizeBaseUrl,
   PKG,
 } from './adapter.ts'
-export { serializeRequest, serializeResponsesRequest, serializeAnthropicRequest } from './serialize.ts'
+export {
+  serializeRequest,
+  serializeRequestWithImages,
+  serializeResponsesRequest,
+  serializeResponsesRequestWithImages,
+  serializeAnthropicRequest,
+  serializeAnthropicRequestWithImages,
+} from './serialize.ts'
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.ts'
 export type * from './types.ts'
 
@@ -148,6 +156,7 @@ const catalogModel: z<NewApiCatalogModel> = z.object({
   maxTokens: z.number().step(1).min(1),
   reasoningEfforts: z.array(z.string()),
   defaultReasoningEffort: z.string(),
+  input: z.array(z.union(['text', 'image'])),
 })
 
 const channelSchema: z<ChannelConfig> = z.object({
@@ -228,6 +237,10 @@ function resolveModels(models: readonly NewApiCatalogModel[] | undefined): NewAp
         `${PKG}: catalog model "${model.id}" default reasoning effort "${model.defaultReasoningEffort}" is not among its reasoning efforts`,
       )
     }
+    if (model.input !== undefined && model.input.length > 0) {
+      if (!model.input.includes('text')) throw new Error(`${PKG}: catalog model "${model.id}" input must include text`)
+      if (new Set(model.input).size !== model.input.length) throw new Error(`${PKG}: catalog model "${model.id}" has duplicate input modalities`)
+    }
     return {
       id: model.id,
       ...model.name === undefined ? {} : { name: model.name },
@@ -236,6 +249,7 @@ function resolveModels(models: readonly NewApiCatalogModel[] | undefined): NewAp
       ...model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens },
       ...model.reasoningEfforts === undefined || model.reasoningEfforts.length === 0 ? {} : { reasoningEfforts: model.reasoningEfforts },
       ...model.defaultReasoningEffort === undefined ? {} : { defaultReasoningEffort: model.defaultReasoningEffort },
+      ...model.input === undefined ? {} : { input: [...model.input] },
     }
   })
 }
@@ -444,7 +458,14 @@ export function apply(ctx: Context, config: Config): void {
     return indexCache.byModel.get(modelId)
   }
 
-  const adapter = new NewApiAdapter({ options: optionFor, resolveApiKey, officialProviderOf })
+  const readImage: NewApiAdapterOptions['readImage'] = async (ref, signal) => {
+    const attachments = ctx.get('attachments')
+    if (attachments === undefined) {
+      throw new LlmError(`${PKG}: image input needs the dsh attachment service`, 'UNSUPPORTED_CONTENT')
+    }
+    return attachments.readImage(ref, signal)
+  }
+  const adapter = new NewApiAdapter({ options: optionFor, resolveApiKey, readImage, officialProviderOf })
   const directoryEntries = (connections: readonly ResolvedNewApiOptions[]): LlmConfigurableProvider[] =>
     connections.map(connection => ({
       provider: connection.provider,

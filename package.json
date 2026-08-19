@@ -42,7 +42,7 @@
     "build:host": "tsc -p tsconfig.json && node scripts/build-host.mjs",
     "build:client": "node scripts/build-client.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
-    "test": "npm run test:client && node test/smoke.mjs",
+    "test": "npm run test:client && node test/smoke.mjs && node test/vision.mjs",
     "cache:models-dev": "node scripts/fetch-models-dev.mjs",
     "test:client": "vitest run"
   },
@@ -58,6 +58,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-connection": "*",
+    "@deepseek-ai/dsh-attachment": "*",
     "@deepseek-ai/dsh-credentials": "*",
     "@deepseek-ai/dsh-launch-environment": "*",
     "@deepseek-ai/dsh-llm": "*",
@@ -76,6 +77,7 @@
     "@deepseek-ai/dsh-client-locale": "0.0.1-rc.1",
     "@deepseek-ai/dsh-client-runtime": "0.0.1-rc.1",
     "@deepseek-ai/dsh-client-ui-settings": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-attachment": "0.0.1-rc.5",
     "@deepseek-ai/dsh-launch-environment": "^0.0.1-rc.3",
     "@deepseek-ai/dsh-timeout": "^0.0.1-rc.1",
     "@testing-library/dom": "^10.4.1",

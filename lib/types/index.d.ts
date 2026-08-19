@@ -18,7 +18,7 @@ import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment';
 import type { NewApiCatalogModel, NewApiConnectionOptions } from './adapter.js';
 import type { NewApiProtocol, ProviderHints } from './types.js';
 export { DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL_EXCLUDE_PATTERNS, DEFAULT_PROVIDER_HINTS, DEFAULT_STREAM_IDLE_TIMEOUT_MS, matchModelsDev, modelNameFromId, NewApiAdapter, normalizeBaseUrl, PKG, } from './adapter.js';
-export { serializeRequest, serializeResponsesRequest, serializeAnthropicRequest } from './serialize.js';
+export { serializeRequest, serializeRequestWithImages, serializeResponsesRequest, serializeResponsesRequestWithImages, serializeAnthropicRequest, serializeAnthropicRequestWithImages, } from './serialize.js';
 export type { NewApiAdapterOptions, NewApiCatalogModel, NewApiConnectionOptions } from './adapter.js';
 export type * from './types.js';
 export declare const name = "llm-newapi";

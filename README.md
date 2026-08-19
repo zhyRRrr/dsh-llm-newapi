@@ -83,6 +83,7 @@ All saved channels are registered at once, each with separate models, protocol, 
     # models:                          # suggested catalog; empty by default, use "Fetch model info" to pull /models
     #   - id: deepseek-chat
     #     contextWindow: 65536
+    #     input: [text, image]           # optional; declare vision support explicitly
     # modelExcludePatterns:            # chat-only filter during discovery (replaces the default wholesale)
     #   - embed                        #   default ['embed','rerank','ranker'] (case-insensitive id substring)
     #   - rerank                       #   set [] to disable the filter; multi-capability ids (bge-m3) must be added manually
@@ -100,6 +101,8 @@ All saved channels are registered at once, each with separate models, protocol, 
 **Generation protocols**: `protocol: chat-completions` is the backward-compatible default and sends `POST {baseURL}/chat/completions` with Bearer auth. `protocol: responses` sends `POST {baseURL}/responses` and translates Responses SSE events. `protocol: anthropic-messages` sends `POST {baseURL}/messages` with `x-api-key` and `anthropic-version: 2023-06-01`, serializing tool calls as Anthropic `tool_use`/`tool_result` blocks. Keep `baseURL` at the gateway root (normally ending in `/v1`); a pasted `/chat/completions`, `/responses`, or `/messages` suffix is normalized away.
 
 **Model discovery**: `GET {baseURL}/models` for all generation protocols. The gateway listing has no reliable capability flags, so embedding / rerank / ranker families are filtered by naming convention (configurable).
+
+**Vision models**: mark a catalog entry with `input: [text, image]` when that upstream model accepts image attachments. The adapter reads the durable dsh attachment bytes and sends a provider-native data URL for Chat Completions, `input_image` for Responses, or a base64 `image` source block for Anthropic Messages. Models without `image` remain text-only. This capability declaration also lets `dsh-sight` leave the original attachment in the request instead of replacing it with a local Windows path.
 
 **Multiple channels**: set `channels` to register several gateways at once. Each entry gets an independent provider route, model catalog, protocol, and credential reference (`newapi` for the legacy route, otherwise `newapi_<provider>`). The web settings page lets you switch channels from the top dropdown; when a URL is pasted, the hostname fills Provider ID and display name until the user edits either field.
 

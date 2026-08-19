@@ -53,10 +53,13 @@ export type ResponsesInputItem = {
     call_id: string;
     output: string;
 };
-export interface ResponsesContent {
+export type ResponsesContent = {
     type: 'input_text' | 'output_text';
     text: string;
-}
+} | {
+    type: 'input_image';
+    image_url: string;
+};
 export interface ResponsesTool {
     type: 'function';
     name: string;
@@ -82,6 +85,13 @@ export type AnthropicContent = {
     type: 'text';
     text: string;
 } | {
+    type: 'image';
+    source: {
+        type: 'base64';
+        media_type: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif';
+        data: string;
+    };
+} | {
     type: 'tool_use';
     id: string;
     name: string;
@@ -104,8 +114,17 @@ export interface WireSystemMessage {
 /** User-role message: a single string of user input. */
 export interface WireUserMessage {
     role: 'user';
-    content: string;
+    content: string | WireContent[];
 }
+export type WireContent = {
+    type: 'text';
+    text: string;
+} | {
+    type: 'image_url';
+    image_url: {
+        url: string;
+    };
+};
 /** Tool-role message: the result of one tool call, keyed by its call id. */
 export interface WireToolMessage {
     role: 'tool';

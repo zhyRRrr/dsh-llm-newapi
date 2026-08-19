@@ -33,9 +33,10 @@ import type {
   StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
+import type { ImageAttachmentRef, StoredImageAttachment } from '@deepseek-ai/dsh-attachment'
 import { idleWatchdog, timeoutOf } from '@deepseek-ai/dsh-timeout'
 import { fetch as undiciFetch, ProxyAgent } from 'undici'
-import { serializeAnthropicRequest, serializeRequest, serializeResponsesRequest } from './serialize.ts'
+import { serializeAnthropicRequestWithImages, serializeRequestWithImages, serializeResponsesRequestWithImages } from './serialize.ts'
 import { parseSse, parseSseEvents } from './sse.ts'
 import { translate, translateAnthropic, translateResponses } from './translate.ts'
 import type {
@@ -85,6 +86,8 @@ export interface NewApiCatalogModel {
    * {@link reasoningEfforts}. Absence defaults to the highest declared rung.
    */
   defaultReasoningEffort?: string
+  /** Accepted input modalities. Omission retains text-only compatibility. */
+  input?: Array<'text' | 'image'>
 }
 
 /**
@@ -141,6 +144,8 @@ export interface NewApiAdapterOptions {
    * `MISSING_CREDENTIAL` when the credentials store holds no value.
    */
   resolveApiKey: (connection: NewApiConnectionOptions) => Promise<string>
+  /** Read durable attachment bytes when a vision-enabled model receives an image. */
+  readImage?: (ref: ImageAttachmentRef, signal?: AbortSignal) => Promise<StoredImageAttachment>
   /**
    * Name the provider route that officially serves a model id, so a
    * multi-provider catalog match can put the vendor's own facts first.
@@ -299,7 +304,7 @@ function modelInfo(provider: string, model: NewApiCatalogModel): LlmModelInfo {
     id: model.id,
     name: model.name ?? model.id,
     ...model.description === undefined ? {} : { description: model.description },
-    inputModalities: ['text'],
+    inputModalities: model.input?.includes('image') ? ['text', 'image'] : ['text'],
   }
 }
 
@@ -440,10 +445,9 @@ export class NewApiAdapter extends LlmAdapter {
     const configured = connection.models.find(entry => entry.id === model)
     const defaultMaxTokens = configured?.maxTokens ?? connection.maxTokens
     return Promise.resolve({
-      // The chat-completions wire route is text-only regardless of catalog
-      // membership, so the uncatalogued fallback declares the same negative
-      // capability — "unknown" here would let the host accept and persist
-      // images the serializer must then reject.
+      // Unknown models remain text-only. A catalog model explicitly opts into
+      // images with input: ['text', 'image'], keeping admission and wire
+      // serialization aligned.
       ...configured === undefined
         ? { provider, id: model, name: model, inputModalities: ['text' as const] }
         : modelInfo(provider, configured),
@@ -723,10 +727,10 @@ export class NewApiAdapter extends LlmAdapter {
     onComment: () => void,
   ): AsyncIterable<StreamChunk> {
     const body = connection.protocol === 'responses'
-      ? serializeResponsesRequest(options)
+      ? await serializeResponsesRequestWithImages(options, this.config.readImage, signal)
       : connection.protocol === 'anthropic-messages'
-        ? serializeAnthropicRequest(options)
-        : serializeRequest(options)
+        ? await serializeAnthropicRequestWithImages(options, this.config.readImage, signal)
+        : await serializeRequestWithImages(options, this.config.readImage, signal)
     // Prepared outside the try so the TRANSPORT label below covers exactly the
     // transport boundary, never a serialization failure.
     const payload = JSON.stringify(body)

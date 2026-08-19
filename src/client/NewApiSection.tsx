@@ -433,6 +433,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       && efforts.includes(model.defaultReasoningEffort)
       ? model.defaultReasoningEffort
       : undefined
+    const vision = Array.isArray(model.input) && model.input.includes('image')
     return {
       id,
       ...name.length > 0 ? { name } : {},
@@ -440,6 +441,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
       ...maxTokens !== undefined ? { maxTokens } : {},
       ...efforts.length > 0 ? { reasoningEfforts: efforts } : {},
       ...preset !== undefined ? { defaultReasoningEffort: preset } : {},
+      ...vision ? { input: ['text', 'image'] } : {},
     }
   })
 
@@ -654,7 +656,7 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
   }
 
   /** Replace one row, dropping optional fields the edit emptied. */
-  const patch = (index: number, next: Record<string, string | number | undefined>): void => {
+  const patch = (index: number, next: Record<string, unknown>): void => {
     setModels(current => current.map((model, at) => {
       if (at !== index) return model
       const cleared = new Set(
@@ -935,6 +937,18 @@ export function NewApiSection(props: NewApiSectionProps): ReactNode {
                       onChange={(event) => { editCapacity(index, 'maxTokens', event.target.value) }}
                     />
                   </label>
+                  <div className="newapi-modelfield">
+                    <span className="newapi-modelfield-label">{t('modelVision')}</span>
+                    <label className="newapi-vision-toggle">
+                      <input
+                        type="checkbox"
+                        aria-label={`${t('modelVision')} ${String(index + 1)}`}
+                        checked={Array.isArray(model.input) && model.input.includes('image')}
+                        onChange={(event) => { patch(index, { input: event.target.checked ? ['text', 'image'] : undefined }) }}
+                      />
+                      {t('modelVisionHint')}
+                    </label>
+                  </div>
                   {Array.isArray(model.reasoningEfforts) && model.reasoningEfforts.length > 0
                     ? (
                       <label className="newapi-modelfield">

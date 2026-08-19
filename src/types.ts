@@ -44,7 +44,9 @@ export type ResponsesInputItem =
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string }
 
-export interface ResponsesContent { type: 'input_text' | 'output_text'; text: string }
+export type ResponsesContent =
+  | { type: 'input_text' | 'output_text'; text: string }
+  | { type: 'input_image'; image_url: string }
 export interface ResponsesTool { type: 'function'; name: string; description: string; parameters: Record<string, unknown> }
 
 /** Request body for the Anthropic Messages API. */
@@ -64,6 +66,7 @@ export type AnthropicMessage =
 
 export type AnthropicContent =
   | { type: 'text'; text: string }
+  | { type: 'image'; source: { type: 'base64'; media_type: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'; data: string } }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'tool_result'; tool_use_id: string; content: string }
 
@@ -82,8 +85,12 @@ export interface WireSystemMessage {
 /** User-role message: a single string of user input. */
 export interface WireUserMessage {
   role: 'user'
-  content: string
+  content: string | WireContent[]
 }
+
+export type WireContent =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
 
 /** Tool-role message: the result of one tool call, keyed by its call id. */
 export interface WireToolMessage {
